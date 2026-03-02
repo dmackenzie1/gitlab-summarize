@@ -1,6 +1,6 @@
 import requests
 
-def call_ollama(prompt: str, ollama_url: str = "http://localhost:11434/v1/completions", model: str = "microsoft/WizardLM-1.0-Python-3.7.10") -> str:
+def call_ollama(prompt: str, ollama_url: str = "http://localhost:11434/v1/completions", model: str = "qwen3.5:9b") -> str:
     headers = {"Content-Type": "application/json"}
     data = {
         "prompt": prompt,
