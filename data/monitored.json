@@ -1,0 +1,58 @@
+[
+  {
+    "project_name": "emss/logs",
+    "project_id": 962,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/logs.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/962/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/aegis",
+    "project_id": 673,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/aegis.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/673/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/coda",
+    "project_id": 670,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/coda.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/670/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/gitlab-templates",
+    "project_id": 695,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/gitlab-templates.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/695/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/maestro",
+    "project_id": 687,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/maestro.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/687/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/packages",
+    "project_id": 685,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/packages.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/685/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/talky-bot",
+    "project_id": 1081,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-bot.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/1081/events?per_page=200",
+    "is_default": true
+  },
+  {
+    "project_name": "emss/talky-transcribe",
+    "project_id": 1299,
+    "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-transcribe.git",
+    "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/1299/events?per_page=200",
+    "is_default": true
+  }
+]
