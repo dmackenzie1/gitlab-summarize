@@ -393,8 +393,7 @@ def generate(
 
     temp_artifacts_ctx = None
     if artifacts_dir is None:
-        temp_artifacts_ctx = tempfile.TemporaryDirectory(prefix="weekly_diff_artifacts_")
-        artifacts_root = Path(temp_artifacts_ctx.name)
+        artifacts_root = out_path.parent / 'artifacts'
     else:
         artifacts_root = artifacts_dir
 
@@ -515,8 +514,7 @@ def generate(
 
     out_path.write_text("".join(md), encoding="utf-8", errors="replace")
 
-    if temp_artifacts_ctx is not None:
-        logging.info(f"Artifacts stored in: {artifacts_root}")
+    logging.info(f"Artifacts stored in: {artifacts_root}")
     logging.info(f"Wrote summary to: {out_path}")
     return 0
 

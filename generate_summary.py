@@ -36,8 +36,8 @@ def main():
 
     clean_output_directory(args.out)
 
-    temp_dir = args.out / 'temp'
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir = args.out / 'artifacts'
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info("Step 1/8: Setting up GitLab client")
     gitlab_client = GitLabClient()
@@ -59,20 +59,20 @@ def main():
     logging.info("Step 4/8: Collecting diffs and generating prompts")
     project_details = {}
     for project_name, stats in project_stats.items():
-        project_temp_dir = temp_dir / project_name
-        project_temp_dir.mkdir(parents=True, exist_ok=True)
+        project_artifacts_dir = artifacts_dir / project_name
+        project_artifacts_dir.mkdir(parents=True, exist_ok=True)
         project_details[project_name] = {
             'open_mrs': [],
             'merged_mrs': [],
             'active_branches': []
         }
         for mr in stats['open_mrs']:
-            diff_path = project_temp_dir / f"{project_name}_{mr['iid']}_diff.txt"
+            diff_path = project_artifacts_dir / f"{project_name}_{mr['iid']}_diff.txt"
             diff_content = gitlab_client.get_diff(project_id=mr['project_id'], mr_iid=mr['iid'], branch_name=None)
             diff_path.write_text(diff_content)
             prompt = f"Review the following diff for {project_name} MR {mr['iid']}:\n{diff_content}"
             response = call_ollama(prompt=prompt, model="qwen2.5-coder:32b")
-            response_path = project_temp_dir / f"{project_name}_{mr['iid']}_response.txt"
+            response_path = project_artifacts_dir / f"{project_name}_{mr['iid']}_response.txt"
             response_path.write_text(response)
             project_details[project_name]['open_mrs'].append({
                 'mr_iid': mr['iid'],
@@ -81,12 +81,12 @@ def main():
             })
 
         for mr in stats['merged_mrs']:
-            diff_path = project_temp_dir / f"{project_name}_{mr['iid']}_diff.txt"
+            diff_path = project_artifacts_dir / f"{project_name}_{mr['iid']}_diff.txt"
             diff_content = gitlab_client.get_diff(project_id=mr['project_id'], mr_iid=mr['iid'], branch_name=None)
             diff_path.write_text(diff_content)
             prompt = f"Review the following diff for {project_name} MR {mr['iid']}:\n{diff_content}"
             response = call_ollama(prompt=prompt)
-            response_path = project_temp_dir / f"{project_name}_{mr['iid']}_response.txt"
+            response_path = project_artifacts_dir / f"{project_name}_{mr['iid']}_response.txt"
             response_path.write_text(response)
             project_details[project_name]['merged_mrs'].append({
                 'mr_iid': mr['iid'],
@@ -95,12 +95,12 @@ def main():
             })
 
         for branch in stats['active_branches']:
-            diff_path = project_temp_dir / f"{project_name}_{branch['name']}_diff.txt"
+            diff_path = project_artifacts_dir / f"{project_name}_{branch['name']}_diff.txt"
             diff_content = gitlab_client.get_diff(project_id=project_stats[project_name]['open_mrs'][0]['project_id'], branch_name=branch['name'], mr_iid=None)
             diff_path.write_text(diff_content)
             prompt = f"Review the following diff for {project_name} branch {branch['name']}:\n{diff_content}"
             response = call_ollama(prompt=prompt, model="qwen2.5-coder:32b")
-            response_path = project_temp_dir / f"{project_name}_{branch['name']}_response.txt"
+            response_path = project_artifacts_dir / f"{project_name}_{branch['name']}_response.txt"
             response_path.write_text(response)
             project_details[project_name]['active_branches'].append({
                 'branch_name': branch['name'],
@@ -125,7 +125,7 @@ def main():
 
     logging.info("Step 6/8: Generating Markdown report")
     report_path = args.out / 'weekly_summary.md'
-    report_content = generate_markdown_report(out_path=report_path, days=args.days, activity_summary=activity_summary, project_stats=project_stats, project_summaries=project_summaries)
+    report_content = generate_markdown_report(out_path=report_path, days=args.days, activity_summary=activity_summary, project_stats=project_stats, project_summaries=project_summaries, artifacts_dir=artifacts_dir)
 
     logging.info("Step 7/8: Writing report to file")
     with open(report_path, 'w') as f:
