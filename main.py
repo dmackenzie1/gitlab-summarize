@@ -64,7 +64,7 @@ REMOTE_DEFAULT = "origin"
 
 # Local Ollama
 OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
-OLLAMA_MODEL_DEFAULT = "qwen3.5:9b"
+OLLAMA_MODEL_DEFAULT = "qwen2.5-coder:32b"
 
 # Caps
 DAYS_DEFAULT = 10
