@@ -387,6 +387,7 @@ def generate(
     max_files_in_patch: int,
     verbose: bool,
 ) -> int:
+    logging.info(f"Generating summary for {len(repo_urls)} repos with days={days}")
     repo_urls = unique_preserve_order(repo_urls)
     since = f"{days}.days.ago"
 
@@ -417,12 +418,14 @@ def generate(
 
             ok, err = ensure_clone(repo_url, repo_dir, verbose=verbose)
             if not ok:
+                logging.error(f"Error cloning repo {repo_url}: {err}")
                 md.append("**Error cloning repo**\n\n")
                 md.append(f"{err}\n\n")
                 continue
 
             fetch_res = fetch_all(repo_dir)
             if not fetch_res.ok:
+                logging.error(f"Error fetching remotes for repo {repo}: {fetch_res.stderr.strip()}")
                 md.append("**Error fetching remotes**\n\n")
                 md.append(f"{fetch_res.stderr.strip()}\n\n")
 
@@ -431,6 +434,7 @@ def generate(
 
             branches, b_err = list_remote_branches(repo_dir, remote)
             if b_err or branches is None:
+                logging.error(f"Error listing branches for repo {repo}: {b_err or 'unknown'}")
                 md.append("**Error listing branches**\n\n")
                 md.append(f"{b_err or 'unknown'}\n\n")
                 continue
@@ -447,6 +451,7 @@ def generate(
                 base = merge_base(repo_dir, parent, br)
                 head = rev_parse(repo_dir, br)
                 if not base or not head:
+                    logging.error(f"Error resolving diff base/head for branch {br} in repo {repo}")
                     md.append(f"### Branch: {br}\n\n")
                     md.append("**Error:** unable to resolve diff base/head\n\n")
                     continue
@@ -491,9 +496,11 @@ def generate(
                 if include_ollama:
                     summary, s_err = call_ollama(ollama_url, ollama_model, prompt, timeout_s=240)
                     if s_err:
+                        logging.error(f"Ollama summary error for repo {repo}, branch {br}: {s_err}")
                         md.append("**Ollama summary error**\n\n")
                         md.append(f"{s_err}\n\n")
                     else:
+                        logging.info(f"Ollama summary for repo {repo}, branch {br}: {summary}")
                         md.append("**What changed (Ollama, diff-grounded)**\n\n")
                         md.append(summary + "\n\n")
                 else:
@@ -508,10 +515,9 @@ def generate(
 
     out_path.write_text("".join(md), encoding="utf-8", errors="replace")
 
-    if temp_artifacts_ctx is not None and verbose:
-        print(f"[artifacts] {artifacts_root}", file=sys.stderr)
-    if verbose:
-        print(f"✅ Wrote {out_path}", file=sys.stderr)
+    if temp_artifacts_ctx is not None:
+        logging.info(f"Artifacts stored in: {artifacts_root}")
+    logging.info(f"Wrote summary to: {out_path}")
     return 0
 
 
@@ -536,8 +542,13 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def main() -> int:
     args = parse_args()
+    logging.info(f"Starting with arguments: {args}")
     artifacts_dir = Path(args.artifacts_dir) if args.artifacts_dir.strip() else None
     return generate(
         repo_urls=REPOS_DEFAULT,
