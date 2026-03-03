@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from utils.ollama import OllamaClient
 from utils.parsing import sanitize_prompt, stable_json_hash, truncate
@@ -260,6 +260,7 @@ def process_activity_logs(
     include_ollama: bool,
     ollama_client: Optional[OllamaClient],
     max_prompt_chars: int,
+    log_item: Callable[[str], None] | None = None,
 ) -> ActivitySummaryResult:
     activity_dir = Path("project_activity")
     artifacts_dir = out_dir / "artifacts" / "activity_logs"
@@ -358,6 +359,8 @@ def process_activity_logs(
 
         filtered_rows = [row for row in normalized_rows if row["_include"]]
         filtered_rows.sort(key=lambda row: (row["_created_dt"] is None, row["_created_dt"] or dt.datetime.max.replace(tzinfo=dt.timezone.utc)))
+        if log_item is not None:
+            log_item(f"project={project_name} source={source_file.name} kept={len(filtered_rows)}/{len(events)}")
 
         csv_path = artifacts_dir / f"{project_slug}.{source_slug}.condensed.csv"
         jsonl_path = artifacts_dir / f"{project_slug}.{source_slug}.condensed.jsonl"
