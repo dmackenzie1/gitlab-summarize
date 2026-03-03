@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +23,7 @@ from utils.git import (
     list_remote_branches,
     merge_base,
     recent_merge_commits,
-    repo_dir_name_from_monitored,
+    repo_dir_name_from_project,
     rev_parse,
 )
 from utils.ollama import OllamaClient
@@ -46,12 +47,12 @@ _VERSION_PATTERNS = [
 ]
 
 
-def read_monitored(path: Path, only_default: bool) -> list[dict]:
+def read_projects(path: Path, only_default: bool) -> list[dict]:
     if not path.exists():
-        raise FileNotFoundError(f"Monitored file not found: {path}")
+        raise FileNotFoundError(f"Projects file not found: {path}")
     obj = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(obj, list):
-        raise ValueError("monitored.json must be a JSON array")
+        raise ValueError("projects.json must be a JSON array")
     items: list[dict] = []
     for entry in obj:
         if not isinstance(entry, dict):
@@ -141,9 +142,18 @@ def _render_weekly_markup(
     return "\n".join(header + ["## Master Summary", master_summary.strip(), ""] + activity_section + ["", content, ""])
 
 
-def generate_weekly_summary(
+@dataclass
+class PipelineRunResult:
+    exit_code: int
+    projects_processed: int
+    branches_analyzed: int
+    artifacts_root: Path
+    errors: list[str]
+
+
+def run_summary_pipeline(
     *,
-    monitored_items: list[dict],
+    projects: list[dict],
     remote: str,
     days: int,
     out_dir: Path,
@@ -154,8 +164,7 @@ def generate_weekly_summary(
     max_patch_chars: int,
     max_prompt_chars: int,
     max_files_in_patch: int,
-    continue_on_error: bool,
-) -> int:
+ ) -> PipelineRunResult:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts_root = out_dir / "artifacts"
     artifacts_root.mkdir(parents=True, exist_ok=True)
@@ -163,6 +172,13 @@ def generate_weekly_summary(
     prompt_cache_dir.mkdir(parents=True, exist_ok=True)
     errors_dir = artifacts_root / "errors"
     errors_dir.mkdir(parents=True, exist_ok=True)
+    project_summaries_dir = artifacts_root / "project_summaries"
+    project_summaries_dir.mkdir(parents=True, exist_ok=True)
+
+    def persist_project_summary(repo_key: str, lines: list[str], sections: list[str]) -> None:
+        project_summary_text = "\n".join(lines).strip() + "\n"
+        (project_summaries_dir / f"{repo_key}.summary.markup").write_text(project_summary_text, encoding="utf-8")
+        sections.append(project_summary_text + "\n")
 
     def call_or_cache(prompt: str, scope: dict) -> tuple[str | None, str | None]:
         if not include_ollama or ollama_client is None:
@@ -186,7 +202,7 @@ def generate_weekly_summary(
         return cleaned, None
 
     repo_sections: list[str] = []
-    repo_rollups: list[tuple[str, str]] = []
+    project_summaries_for_master: list[tuple[str, str]] = []
 
     activity_result = process_activity_logs(
         out_dir=out_dir,
@@ -200,11 +216,14 @@ def generate_weekly_summary(
     if not use_temp:
         work_root.mkdir(parents=True, exist_ok=True)
 
-    for item in monitored_items:
+    branches_analyzed = 0
+    errors: list[str] = []
+
+    for item in projects:
         ssh_url = str(item.get("ssh_url", "")).strip()
         project_name = str(item.get("project_name", "")).strip()
         repo_display = project_name or ssh_url
-        repo_key = repo_dir_name_from_monitored(project_name, ssh_url)
+        repo_key = repo_dir_name_from_project(project_name, ssh_url)
         repo_dir = work_root / repo_key
         repo_art_dir = artifacts_root / repo_key
         repo_art_dir.mkdir(parents=True, exist_ok=True)
@@ -218,15 +237,18 @@ def generate_weekly_summary(
         ok, err = ensure_clone(ssh_url, repo_dir)
         if not ok:
             lines.append(f"- Clone error: {err}")
-            repo_sections.append("\n".join(lines) + "\n")
+            errors.append(f"{repo_display}: clone error: {err}")
+            persist_project_summary(repo_key, lines, repo_sections)
             continue
         fetch_all(repo_dir)
 
         parent = get_default_remote_branch(repo_dir, remote) or f"{remote}/main"
         branches, b_err = list_remote_branches(repo_dir, remote)
         if b_err or branches is None:
-            lines.append(f"- Branch listing error: {b_err or 'unknown'}")
-            repo_sections.append("\n".join(lines) + "\n")
+            msg = b_err or "unknown"
+            lines.append(f"- Branch listing error: {msg}")
+            errors.append(f"{repo_display}: branch listing error: {msg}")
+            persist_project_summary(repo_key, lines, repo_sections)
             continue
         active = [b for b in branches if branch_has_recent_commits(repo_dir, b, f"{days} days ago")]
         lines.append(f"- Active branches in window: {len(active)}")
@@ -238,6 +260,8 @@ def generate_weekly_summary(
                 lines.append(f"  - {m['date']} {m['subject']} ({m['author']})")
 
         branch_rollups: list[tuple[str, str]] = []
+        branches_analyzed += len(active)
+
         for branch in active:
             safe_branch = branch.replace("/", "__")
             if branch == parent:
@@ -330,9 +354,9 @@ def generate_weekly_summary(
             rollup, rollup_err = call_or_cache(rollup_prompt, {"repo": repo_display, "stage": "repo_rollup"})
             if rollup:
                 (repo_art_dir / "repo_rollup.summary.txt").write_text(rollup + "\n", encoding="utf-8")
-                repo_rollups.append((repo_display, rollup))
-            elif rollup_err and not continue_on_error:
-                raise RuntimeError(f"repo rollup failed for {repo_display}: {rollup_err}")
+                project_summaries_for_master.append((repo_display, rollup))
+            elif rollup_err:
+                errors.append(f"{repo_display}: repo rollup failed: {rollup_err}")
 
         lines.append("### Activity")
         if activity_rollup:
@@ -341,11 +365,11 @@ def generate_weekly_summary(
             lines.append("- No activity rollup found for this project.")
         lines.append("")
 
-        repo_sections.append("\n".join(lines) + "\n")
+        persist_project_summary(repo_key, lines, repo_sections)
 
     master_summary = "No repo summaries available."
-    if repo_rollups and include_ollama:
-        master_prompt = build_repo_rollup_prompt("ALL_REPOS", repo_rollups)
+    if project_summaries_for_master and include_ollama:
+        master_prompt = build_repo_rollup_prompt("ALL_REPOS", project_summaries_for_master)
         master_prompt = truncate(master_prompt, max_prompt_chars, suffix="\n\n[...prompt truncated...]\n")
         (artifacts_root / "master_summary.prompt.txt").write_text(master_prompt, encoding="utf-8")
         master_text, master_err = call_or_cache(master_prompt, {"stage": "master_summary"})
@@ -369,4 +393,10 @@ def generate_weekly_summary(
     (out_dir / "weeklySummary.email.markup").write_text(weekly_email, encoding="utf-8")
 
     logging.info("Wrote %s", weekly_file)
-    return 0
+    return PipelineRunResult(
+        exit_code=0,
+        projects_processed=len(projects),
+        branches_analyzed=branches_analyzed,
+        artifacts_root=artifacts_root,
+        errors=errors,
+    )

@@ -35,7 +35,7 @@ def git(repo_dir: Path, *args: str) -> CmdResult:
     return run_cmd(["git", "-C", str(repo_dir), *args])
 
 
-def repo_dir_name_from_monitored(project_name: str, ssh_url: str) -> str:
+def repo_dir_name_from_project(project_name: str, ssh_url: str) -> str:
     pn = (project_name or "").strip()
     if "/" in pn:
         return pn.split("/")[-1].strip() or pn.replace("/", "__")

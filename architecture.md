@@ -21,7 +21,7 @@
 - `utils/parsing.py`: text/prompt helpers, chunking, sanitization, stable hashing for cache keys.
 - `utils/email_markup.py`: reusable email-oriented markup rendering.
 - `utils/activity_logs.py`: GitLab Project Activity ingestion pipeline.
-  - discovers `project_activity/*.json`
+  - discovers `project_activity/*.json` and `project_activity/*.csv`
   - resolves `project_id` from JSON payload first, then filename fallback
   - normalizes/filter events into condensed CSV + JSONL artifacts
   - sanitizes/chunks activity rows for Ollama-safe prompts
@@ -29,7 +29,7 @@
 
 ## Data flow
 
-1. Read monitored repositories from `data/monitored.json`.
+1. Read project repositories from `data/projects.json`.
 2. Clone/fetch each repository into repo cache (or temporary workspace).
 3. Detect active branches based on `--days` window.
 4. For each branch:
@@ -37,8 +37,8 @@
    - capture curated patch + version/build signals
    - summarize via Ollama (with caching)
    - persist branch artifacts (`*.patch.txt`, `*.prompt.txt`, `*.summary.txt`)
-5. Build repo rollup summaries from branch summaries.
-6. Build a master summary from repo rollups.
+5. Build project-level rollup summaries from branch summaries (`<out-dir>/artifacts/<repo>/repo_rollup.summary.txt`).
+6. Persist project summaries (`<out-dir>/artifacts/project_summaries/*.summary.markup`) and then build a master summary from project rollups.
 7. Render outputs:
    - `weeklySummary.markup`
    - `weeklySummary.email.markup`
@@ -120,7 +120,7 @@ git log --since="10 days ago" --pretty=format:'%h %ad %an %s' --date=short
 ## Ollama strategy
 
 - Request timeout configurable (`--ollama-timeout`)
-- Retries + exponential backoff (`--ollama-retries`, `--ollama-backoff`)
+- Retries + exponential backoff (`--ollama-retries`)
 - Session reuse via `requests.Session`
 - Optional `keep_alive` payload (`--ollama-keep-alive`)
 - Caching to avoid re-summarizing unchanged payloads:
@@ -138,6 +138,7 @@ Given `--out-dir <DIR>`:
 - `<DIR>/weeklySummary.markup`
 - `<DIR>/weeklySummary.email.markup`
 - `<DIR>/artifacts/<repo>/...`
+- `<DIR>/artifacts/project_summaries/*.summary.markup`
 - `<DIR>/artifacts/master_summary.prompt.txt`
 - `<DIR>/artifacts/master_summary.summary.txt`
 - `<DIR>/artifacts/errors/*.log`
@@ -150,20 +151,20 @@ Given `--out-dir <DIR>`:
 ### Local run
 
 ```bash
-python main.py --monitored data/monitored.json --days 10 --out-dir out
+python main.py --projects data/projects.json --days 10 --out-dir out
 ```
 
 ### Without Ollama (dry run for git artifacts)
 
 ```bash
-python main.py --no-ollama --monitored data/monitored.json --out-dir out
+python main.py --no-ollama --projects data/projects.json --out-dir out
 ```
 
 ### CI-friendly example
 
 ```bash
 python main.py \
-  --monitored data/monitored.json \
+  --projects data/projects.json \
   --days 10 \
   --out-dir out \
   --ollama-url http://ollama:11434/api/generate \
