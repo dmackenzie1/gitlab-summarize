@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-generate_summary.py (iteration)
+main.py
 
-Goal: weekly summary that is SHORT and based on branch *content*, not commit messages.
-- Diff each active branch vs its parent (merge-base(parent, branch)..branch)
-- Send a *curated* diff bundle to local Ollama for summarization
-- weekly_summary.md contains ONLY:
-    - repo/branch + parent + diff range
-    - a few "version/build signals" (if detected)
-    - Ollama's summary (diff-grounded)
-  It does NOT include raw diffs/patches (those go to temp artifact files).
+Weekly branch content summary (diff-grounded, not commit-message-grounded).
 
-Fixes vs prior iteration
-- UnicodeDecodeError: all subprocess output is treated as bytes and decoded as UTF-8 with errors='replace'
-- Ollama input: JSON is built with json.dumps (no hand-built JSON); tabs are replaced; control chars removed
-- Avoid gigantic prompts: excludes lockfiles/big/noisy files from patch; caps prompt chars
-- Raw diffs are written to an artifacts directory (temp by default, or --artifacts-dir)
+Flow:
+- Read repos from ./data/monitored.json (array of objects with ssh_url, project_name, etc.)
+- Clone/fetch each repo
+- Determine parent baseline branch (remote/HEAD fallback remote/main)
+- Find active remote branches with commits since N days ago (DO NOT exclude parent from active list)
+- For each active branch:
+    - If branch == parent baseline: record as baseline (no diff computed)
+    - Else:
+        - diff range = merge-base(parent, branch)..branch
+        - build curated patch bundle + version/build signals
+        - call Ollama -> save per-branch summary
+- For each repo:
+    - aggregate branch summaries -> call Ollama -> repo rollup summary
+- Write weekly_summary.md (no raw diffs embedded)
+- Store artifacts (patch/prompt/summary) under artifacts directory
 
-Run
-  python3 generate_summary.py
-  python3 generate_summary.py --days 10
-  python3 generate_summary.py --no-ollama
-  python3 generate_summary.py --temp
+Notes:
+- subprocess output decoded as UTF-8 with replacement
+- Prompt sanitized to remove control chars and tabs
+- Patch is curated: excludes noisy files, limited #files and size
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -38,35 +42,12 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 
-# ----------------------------
-# Repo list
-# Keep all repos here; comment out ones you don't want temporarily.
-# ----------------------------
-
-REPOS_DEFAULT = [
-    # In-scope now:
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/logs.git",
-    # "git@jsfitpeegitlab.ndc.nasa.gov:emss/acme.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/aegis.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/coda.git",
-    # "git@jsfitpeegitlab.ndc.nasa.gov:emss/coda-streamers.git",
-    # "git@jsfitpeegitlab.ndc.nasa.gov:emss/docker-images.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/gitlab-templates.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/maestro.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/packages.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-bot.git",
-    # "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-capture.git",
-    "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-transcribe.git",
-    # "git@jsfitpeegitlab.ndc.nasa.gov:emss/texty-bot.git",
-]
-
 REMOTE_DEFAULT = "origin"
 
-# Local Ollama
 OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
 OLLAMA_MODEL_DEFAULT = "qwen2.5-coder:32b"
 
-# Caps
+# Defaults / caps
 DAYS_DEFAULT = 10
 MAX_PROMPT_CHARS_DEFAULT = 55_000
 MAX_PATCH_CHARS_DEFAULT = 40_000
@@ -83,7 +64,7 @@ NOISY_FILES = {
 NOISY_SUFFIXES = (".lock", ".min.js", ".map")
 NOISY_PATH_CONTAINS = ("/node_modules/", "/dist/", "/build/", "/.venv/")
 
-# Files/paths we still scan for version/build signals
+# Files/paths to scan for version/build signals
 VERSION_SIGNAL_PATHS = [
     ".nvmrc",
     ".node-version",
@@ -103,6 +84,10 @@ VERSION_SIGNAL_PATHS = [
 ]
 
 
+# ----------------------------
+# Helpers
+# ----------------------------
+
 @dataclass
 class CmdResult:
     ok: bool
@@ -118,8 +103,6 @@ def _decode(b: bytes) -> str:
 
 def run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> CmdResult:
     try:
-        import subprocess
-
         p = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
@@ -142,12 +125,11 @@ def git(repo_dir: Path, *args: str) -> CmdResult:
     return run_cmd(["git", "-C", str(repo_dir), *args])
 
 
-def repo_name_from_url(url: str) -> str:
-    m = re.search(r":([^/]+)/([^/]+)\.git$", url.strip())
-    if m:
-        return m.group(2)
-    base = url.strip().split("/")[-1]
-    return base[:-4] if base.endswith(".git") else base
+def setup_logging(quiet: bool) -> None:
+    logging.basicConfig(
+        level=(logging.WARNING if quiet else logging.INFO),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
 
 def unique_preserve_order(items: Iterable[str]) -> List[str]:
@@ -160,6 +142,19 @@ def unique_preserve_order(items: Iterable[str]) -> List[str]:
         seen.add(x)
         out.append(x)
     return out
+
+
+def repo_dir_name_from_monitored(project_name: str, ssh_url: str) -> str:
+    # Prefer last path component of project_name (e.g., "emss/logs" -> "logs")
+    pn = (project_name or "").strip()
+    if "/" in pn:
+        return pn.split("/")[-1].strip() or pn.replace("/", "__")
+    # fallback: derive from ssh_url
+    url = (ssh_url or "").strip()
+    base = url.split("/")[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    return base or pn or "repo"
 
 
 def ensure_clone(repo_url: str, target_dir: Path, verbose: bool) -> Tuple[bool, Optional[str]]:
@@ -179,6 +174,7 @@ def fetch_all(repo_dir: Path) -> CmdResult:
 
 
 def get_default_remote_branch(repo_dir: Path, remote: str) -> Optional[str]:
+    # returns like "origin/main"
     res = git(repo_dir, "symbolic-ref", "-q", f"refs/remotes/{remote}/HEAD")
     if not res.ok:
         return None
@@ -224,15 +220,15 @@ def rev_parse(repo_dir: Path, ref: str) -> Optional[str]:
     return sha or None
 
 
-def diff_stat(repo_dir: Path, base: str, head: str) -> Optional[str]:
+def diff_stat(repo_dir: Path, base: str, head: str) -> str:
     res = git(repo_dir, "diff", "--stat", f"{base}..{head}")
-    return res.stdout.strip() if res.ok else None
+    return res.stdout.strip() if res.ok else ""
 
 
-def diff_name_status(repo_dir: Path, base: str, head: str) -> Optional[List[str]]:
+def diff_name_status(repo_dir: Path, base: str, head: str) -> List[str]:
     res = git(repo_dir, "diff", "--name-status", f"{base}..{head}")
     if not res.ok:
-        return None
+        return []
     return [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
 
 
@@ -262,10 +258,7 @@ def is_noisy_path(path: str) -> bool:
         return True
     if p.endswith(NOISY_SUFFIXES):
         return True
-    for frag in NOISY_PATH_CONTAINS:
-        if frag in p:
-            return True
-    return False
+    return any(frag in p for frag in NOISY_PATH_CONTAINS)
 
 
 def path_is_version_signal(path: str) -> bool:
@@ -281,6 +274,8 @@ def path_is_version_signal(path: str) -> bool:
 
 
 def diff_patch(repo_dir: Path, base: str, head: str, paths: List[str], max_chars: int) -> str:
+    if not paths:
+        return ""
     res = git(repo_dir, "diff", f"{base}..{head}", "--patch", "--no-color", "--minimal", "--", *paths)
     txt = res.stdout if res.ok else ""
     if len(txt) > max_chars:
@@ -315,6 +310,7 @@ def extract_version_signals_from_files(repo_dir: Path, base: str, head: str, pat
                         s = s[:240] + "..."
                     signals.append(f"{p}: {s}")
                     break
+    # de-dupe preserve order
     seen = set()
     out: List[str] = []
     for s in signals:
@@ -331,48 +327,99 @@ def sanitize_prompt(text: str) -> str:
     return text
 
 
-def call_ollama(ollama_url: str, model: str, prompt: str, timeout_s: int) -> Tuple[Optional[str], Optional[str]]:
+def call_ollama(url: str, model: str, prompt: str, timeout_s: int = 600) -> Tuple[Optional[str], Optional[str]]:
     payload = {"model": model, "stream": False, "prompt": prompt}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(ollama_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return None, f"Ollama request failed: {e}"
+
     try:
         obj = json.loads(body)
     except Exception:
         snippet = body[:600] + ("..." if len(body) > 600 else "")
         return None, f"Could not parse Ollama JSON response. Snippet: {snippet}"
+
     text = obj.get("response", "")
     if not isinstance(text, str) or not text.strip():
         return None, "Ollama returned empty response"
     return text.strip(), None
 
 
-def build_prompt(repo: str, branch: str, parent: str, diffstat: str, patch: str, version_signals: List[str]) -> str:
+def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patch: str, version_signals: List[str]) -> str:
     vs = "\n".join(f"- {s}" for s in version_signals[:40]) or "(none detected)"
     return sanitize_prompt(
         "You are summarizing code changes for a weekly engineering report.\n"
-        "Do NOT rely on commit messages or authors. Use only the diff evidence provided.\n\n"
+        "Use only the diff evidence provided; do NOT rely on commit messages/authors.\n\n"
         f"Repo: {repo}\n"
         f"Branch: {branch}\n"
-        f"Parent: {parent}\n\n"
+        f"Parent baseline: {parent}\n\n"
         f"DIFFSTAT:\n{diffstat}\n\n"
-        "VERSION/BUILD SIGNALS (extracted from lockfiles/CI/Docker where applicable):\n"
+        "VERSION/BUILD SIGNALS:\n"
         f"{vs}\n\n"
         "PATCH (curated; may be truncated):\n"
         f"{patch}\n\n"
         "Return:\n"
         "- 3-8 bullet points: what changed in behavior/capabilities, grounded in the diff\n"
         "- 0-3 bullet points: risks/breaking changes/migrations\n"
-        "- 0-3 bullet points: notable version/build changes\n"
+        "- 0-3 bullet points: notable version/build changes (only if significant)\n"
     )
 
 
+def build_repo_rollup_prompt(repo: str, parent: str, branch_summaries: List[Tuple[str, str]]) -> str:
+    parts = [
+        "You are producing a repo-level weekly rollup summary from branch-level diff-grounded summaries.",
+        "Do not invent changes; only consolidate what is present below.",
+        "If version/build changes are minor, omit them. Only include them if significant or likely to affect builds/deployments.",
+        "",
+        f"Repo: {repo}",
+        f"Parent baseline: {parent}",
+        "",
+        "BRANCH SUMMARIES:",
+    ]
+    for br, summ in branch_summaries:
+        parts.append(f"\n### {br}\n{summ.strip()}\n")
+    parts.append(
+        "\nReturn:\n"
+        "- 4-10 bullet points: overall highlights across branches\n"
+        "- 0-5 bullet points: cross-cutting risks/migrations\n"
+        "- 0-5 bullet points: significant version/build changes across branches (omit minor)\n"
+    )
+    return sanitize_prompt("\n".join(parts))
+
+
+def read_monitored(path: Path, only_default: bool) -> List[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"Monitored file not found: {path}")
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(obj, list):
+        raise ValueError("monitored.json must be a JSON array")
+    items: List[dict] = []
+    for it in obj:
+        if not isinstance(it, dict):
+            continue
+        if only_default and not bool(it.get("is_default", False)):
+            continue
+        if not it.get("ssh_url"):
+            continue
+        items.append(it)
+    return items
+
+
+# ----------------------------
+# Main generation
+# ----------------------------
+
 def generate(
-    repo_urls: List[str],
+    monitored_items: List[dict],
     remote: str,
     days: int,
     out_path: Path,
@@ -387,44 +434,44 @@ def generate(
     max_files_in_patch: int,
     verbose: bool,
 ) -> int:
-    logging.info(f"Generating summary for {len(repo_urls)} repos with days={days}")
-    repo_urls = unique_preserve_order(repo_urls)
-    since = f"{days}.days.ago"
+    logging.info(f"Generating summary for {len(monitored_items)} repos, days={days}")
 
-    temp_artifacts_ctx = None
-    if artifacts_dir is None:
-        artifacts_root = out_path.parent / 'artifacts'
-    else:
-        artifacts_root = artifacts_dir
+    since = f"{days} days ago"
 
+    artifacts_root = artifacts_dir if artifacts_dir else (out_path.parent / "artifacts")
     artifacts_root.mkdir(parents=True, exist_ok=True)
 
     md: List[str] = []
     md.append("# Weekly Branch Content Summary\n\n")
     md.append(f"_Generated: {dt.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')}_\n\n")
     md.append(f"_Branch activity window: commits since **{since}**_\n\n")
-    md.append("_Diff method: merge-base(parent, branch)..branch_\n\n")
-    md.append(f"_Mode: `{'temp' if use_temp else 'cache'}` | Remote: `{remote}` | Repos: {len(repo_urls)}_\n\n")
-    md.append(f"_Artifacts: diffs/prompts stored under `{artifacts_root}` (not embedded in this markdown)_\n\n")
+    md.append("_Diff method: merge-base(parent, branch)..branch (parent branch is listed but has no diff vs itself)_\n\n")
+    md.append(f"_Mode: `{'temp' if use_temp else 'cache'}` | Remote: `{remote}` | Repos: {len(monitored_items)}_\n\n")
+    md.append(f"_Artifacts: `{artifacts_root}` (patch/prompt/summary per branch + repo rollups)_\n\n")
     md.append(f"_Ollama: {'enabled' if include_ollama else 'disabled'} | URL: `{ollama_url}` | Model: `{ollama_model}`_\n\n")
 
     def process_all(work_root: Path) -> None:
-        for repo_url in repo_urls:
-            repo = repo_name_from_url(repo_url)
-            repo_dir = work_root / repo
+        for item in monitored_items:
+            ssh_url = str(item.get("ssh_url", "")).strip()
+            project_name = str(item.get("project_name", "")).strip()
+            repo_display = project_name or ssh_url
 
-            md.append(f"## Repo: {repo}\n\n")
+            repo_dir_name = repo_dir_name_from_monitored(project_name=project_name, ssh_url=ssh_url)
+            repo_dir = work_root / repo_dir_name
 
-            ok, err = ensure_clone(repo_url, repo_dir, verbose=verbose)
+            md.append(f"## Repo: {repo_display}\n\n")
+            md.append(f"_Clone_: `{ssh_url}`\n\n")
+
+            ok, err = ensure_clone(ssh_url, repo_dir, verbose=verbose)
             if not ok:
-                logging.error(f"Error cloning repo {repo_url}: {err}")
+                logging.error(f"Clone failed for {ssh_url}: {err}")
                 md.append("**Error cloning repo**\n\n")
                 md.append(f"{err}\n\n")
                 continue
 
             fetch_res = fetch_all(repo_dir)
             if not fetch_res.ok:
-                logging.error(f"Error fetching remotes for repo {repo}: {fetch_res.stderr.strip()}")
+                logging.error(f"Fetch failed for {repo_display}: {fetch_res.stderr.strip()}")
                 md.append("**Error fetching remotes**\n\n")
                 md.append(f"{fetch_res.stderr.strip()}\n\n")
 
@@ -433,36 +480,52 @@ def generate(
 
             branches, b_err = list_remote_branches(repo_dir, remote)
             if b_err or branches is None:
-                logging.error(f"Error listing branches for repo {repo}: {b_err or 'unknown'}")
+                logging.error(f"Branch listing failed for {repo_display}: {b_err or 'unknown'}")
                 md.append("**Error listing branches**\n\n")
                 md.append(f"{b_err or 'unknown'}\n\n")
                 continue
 
+            # NOTE: parent is NOT excluded here (per your request)
             active = [br for br in branches if branch_has_recent_commits(repo_dir, br, since)]
             md.append(f"_Active branches_: {len(active)}/{len(branches)}\n\n")
+
             if not active:
+                md.append("_No active branches in window._\n\n")
                 continue
 
+            repo_art_dir = artifacts_root / repo_dir_name
+            repo_art_dir.mkdir(parents=True, exist_ok=True)
+
+            branch_summaries_for_rollup: List[Tuple[str, str]] = []
+
             for br in active:
+                md.append(f"### Branch: {br}\n\n")
+
+                # Special-case the parent branch: list it, but no diff vs parent needed
                 if br == parent:
+                    md.append("_Baseline branch (parent). No diff computed._\n\n")
+                    (repo_art_dir / f"{br.replace('/', '__')}.summary.txt").write_text(
+                        "Baseline branch (parent). No diff computed.\n", encoding="utf-8", errors="replace"
+                    )
                     continue
 
                 base = merge_base(repo_dir, parent, br)
                 head = rev_parse(repo_dir, br)
                 if not base or not head:
-                    logging.error(f"Error resolving diff base/head for branch {br} in repo {repo}")
-                    md.append(f"### Branch: {br}\n\n")
+                    logging.error(f"Unable to resolve base/head for {repo_display} {br}")
                     md.append("**Error:** unable to resolve diff base/head\n\n")
                     continue
 
-                stat = diff_stat(repo_dir, base, head) or ""
-                ns = diff_name_status(repo_dir, base, head) or []
+                md.append(f"_Diff range_: `{base[:10]}..{head[:10]}`\n\n")
+
+                stat = diff_stat(repo_dir, base, head)
+                ns = diff_name_status(repo_dir, base, head)
 
                 num = diff_numstat(repo_dir, base, head)
                 candidate_paths = [p for p, _ in num if not is_noisy_path(p)]
                 chosen_paths = candidate_paths[:max_files_in_patch]
 
-                changed_paths = []
+                changed_paths: List[str] = []
                 for ln in ns:
                     parts = ln.split("\t")
                     if len(parts) >= 2:
@@ -473,18 +536,12 @@ def generate(
                 patch = diff_patch(repo_dir, base, head, chosen_paths, max_chars=max_patch_chars)
 
                 safe_branch = br.replace("/", "__")
-                artifact_dir = artifacts_root / repo
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-
-                prompt = build_prompt(repo, br, parent, stat, patch, version_signals)
+                prompt = build_branch_prompt(repo_display, br, parent, stat, patch, version_signals)
                 if len(prompt) > max_prompt_chars:
                     prompt = prompt[:max_prompt_chars] + "\n\n[...prompt truncated...]\n"
 
-                (artifact_dir / f"{safe_branch}.prompt.txt").write_text(prompt, encoding="utf-8", errors="replace")
-                (artifact_dir / f"{safe_branch}.patch.txt").write_text(patch, encoding="utf-8", errors="replace")
-
-                md.append(f"### Branch: {br}\n\n")
-                md.append(f"_Diff range_: `{base[:10]}..{head[:10]}`\n\n")
+                (repo_art_dir / f"{safe_branch}.patch.txt").write_text(patch, encoding="utf-8", errors="replace")
+                (repo_art_dir / f"{safe_branch}.prompt.txt").write_text(prompt, encoding="utf-8", errors="replace")
 
                 if version_signals:
                     md.append("**Version/build signals**\n\n")
@@ -495,15 +552,47 @@ def generate(
                 if include_ollama:
                     summary, s_err = call_ollama(ollama_url, ollama_model, prompt, timeout_s=240)
                     if s_err:
-                        logging.error(f"Ollama summary error for repo {repo}, branch {br}: {s_err}")
+                        logging.error(f"Ollama error {repo_display} {br}: {s_err}")
                         md.append("**Ollama summary error**\n\n")
                         md.append(f"{s_err}\n\n")
+                        (repo_art_dir / f"{safe_branch}.summary.txt").write_text(
+                            f"ERROR: {s_err}\n", encoding="utf-8", errors="replace"
+                        )
                     else:
-                        logging.info(f"Ollama summary for repo {repo}, branch {br}: {summary}")
+                        (repo_art_dir / f"{safe_branch}.summary.txt").write_text(
+                            summary + "\n", encoding="utf-8", errors="replace"
+                        )
+                        branch_summaries_for_rollup.append((br, summary))
                         md.append("**What changed (Ollama, diff-grounded)**\n\n")
                         md.append(summary + "\n\n")
                 else:
                     md.append("_Ollama disabled; see artifacts for prompt/patch._\n\n")
+
+            # repo rollup
+            if include_ollama and branch_summaries_for_rollup:
+                rollup_prompt = build_repo_rollup_prompt(repo_display, parent, branch_summaries_for_rollup)
+                if len(rollup_prompt) > max_prompt_chars:
+                    rollup_prompt = rollup_prompt[:max_prompt_chars] + "\n\n[...prompt truncated...]\n"
+
+                (repo_art_dir / "repo_rollup.prompt.txt").write_text(
+                    rollup_prompt, encoding="utf-8", errors="replace"
+                )
+
+                rollup, r_err = call_ollama(ollama_url, ollama_model, rollup_prompt, timeout_s=240)
+                if r_err:
+                    logging.error(f"Repo rollup error {repo_display}: {r_err}")
+                    md.append("### Repo rollup (Ollama)\n\n")
+                    md.append("**Ollama rollup error**\n\n")
+                    md.append(f"{r_err}\n\n")
+                    (repo_art_dir / "repo_rollup.summary.txt").write_text(
+                        f"ERROR: {r_err}\n", encoding="utf-8", errors="replace"
+                    )
+                else:
+                    (repo_art_dir / "repo_rollup.summary.txt").write_text(
+                        rollup + "\n", encoding="utf-8", errors="replace"
+                    )
+                    md.append("### Repo rollup (Ollama)\n\n")
+                    md.append(rollup + "\n\n")
 
     if use_temp:
         with tempfile.TemporaryDirectory(prefix="weekly_repo_cache_") as td:
@@ -513,16 +602,19 @@ def generate(
         process_all(cache_dir)
 
     out_path.write_text("".join(md), encoding="utf-8", errors="replace")
-
-    logging.info(f"Artifacts stored in: {artifacts_root}")
     logging.info(f"Wrote summary to: {out_path}")
+    logging.info(f"Artifacts stored in: {artifacts_root}")
     return 0
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Diff-based weekly summary per branch, summarized via local Ollama.")
+    p.add_argument("--monitored", default="data/monitored.json", help="Path to monitored.json")
+    p.add_argument("--only-default", action="store_true", help="Only include entries where is_default=true")
+
     p.add_argument("--remote", default=REMOTE_DEFAULT)
     p.add_argument("--days", type=int, default=DAYS_DEFAULT)
+
     p.add_argument("--out", default="weekly_summary.md")
     p.add_argument("--cache-dir", default="repo_cache")
     p.add_argument("--temp", action="store_true")
@@ -535,34 +627,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS_DEFAULT)
     p.add_argument("--max-files", type=int, default=MAX_FILES_IN_PATCH_DEFAULT)
 
-    p.add_argument("--artifacts-dir", default="")
+    p.add_argument("--artifacts-dir", default="", help="Artifacts output directory (default: alongside --out).")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--verbose", action="store_true")
     return p.parse_args()
 
 
-import logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 def main() -> int:
     args = parse_args()
-    logging.info(f"Starting with arguments: {args}")
-    artifacts_dir = Path(args.artifacts_dir) if args.artifacts_dir.strip() else None
+    setup_logging(args.quiet)
+
+    monitored_path = Path(args.monitored).resolve()
+    monitored_items = read_monitored(monitored_path, only_default=args.only_default)
+
+    out_path = Path(args.out).resolve()
+    cache_dir = Path(args.cache_dir).resolve()
+    artifacts_dir = Path(args.artifacts_dir).resolve() if args.artifacts_dir else None
+
     return generate(
-        repo_urls=REPOS_DEFAULT,
+        monitored_items=monitored_items,
         remote=args.remote,
         days=args.days,
-        out_path=Path(args.out),
-        cache_dir=Path(args.cache_dir),
+        out_path=out_path,
+        cache_dir=cache_dir,
         use_temp=args.temp,
         artifacts_dir=artifacts_dir,
         include_ollama=(not args.no_ollama),
         ollama_url=args.ollama_url,
         ollama_model=args.ollama_model,
-        max_patch_chars=max(5_000, args.max_patch_chars),
-        max_prompt_chars=max(10_000, args.max_prompt_chars),
-        max_files_in_patch=max(1, args.max_files),
-        verbose=(not args.quiet),
+        max_patch_chars=args.max_patch_chars,
+        max_prompt_chars=args.max_prompt_chars,
+        max_files_in_patch=args.max_files,
+        verbose=args.verbose,
     )
 
 
