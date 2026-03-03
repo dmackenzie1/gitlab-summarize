@@ -237,6 +237,46 @@ def _clean_wrapped_hyphenation(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+_SPECULATIVE_PHRASES = [
+    "may",
+    "might",
+    "could potentially",
+    "likely includes",
+    "potentially incorporates",
+    "requires verification",
+]
+
+
+def _strip_noise(text: str) -> str:
+    cleaned = _clean_wrapped_hyphenation(text)
+    cleaned = re.sub(r"\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b[a-z0-9_-]*autobot[a-z0-9_-]*\b.*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^#+\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.rstrip(";")
+
+
+def _is_major_version_bump(text: str) -> bool:
+    match = re.search(r"(\d+)\.\d+(?:\.\d+)?\s*(?:->|→|to)\s*(\d+)\.\d+(?:\.\d+)?", text)
+    if not match:
+        return False
+    return int(match.group(1)) != int(match.group(2))
+
+
+def _is_speculative_without_evidence(text: str) -> bool:
+    lowered = text.lower()
+    if not any(phrase in lowered for phrase in _SPECULATIVE_PHRASES):
+        return False
+    evidence_tokens = ["failed", "failure", "error", "breaking", "action required"]
+    return not (_is_major_version_bump(text) or any(token in lowered for token in evidence_tokens))
+
+
+def _clean_bullet(text: str) -> str:
+    cleaned = _strip_noise(text)
+    cleaned = re.sub(r"\s*;+\s*$", "", cleaned)
+    return cleaned
+
+
 def _extract_bullets(text: str) -> list[str]:
     bullets: list[str] = []
     for raw in text.splitlines():
@@ -249,8 +289,8 @@ def _extract_bullets(text: str) -> list[str]:
             candidate = re.sub(r"^\d+[\.)]\s+", "", line)
         else:
             candidate = line
-        candidate = _clean_wrapped_hyphenation(candidate)
-        if candidate:
+        candidate = _clean_bullet(candidate)
+        if candidate and not _is_speculative_without_evidence(candidate):
             bullets.append(candidate)
     return bullets
 
@@ -297,6 +337,98 @@ def _top_bullets(bullets: list[str], limit: int) -> list[str]:
     return ranked[:limit]
 
 
+def _normalize_for_cross_project(text: str) -> str:
+    normalized = _normalized_text(text)
+    normalized = re.sub(r"\bemss\b", "", normalized)
+    normalized = re.sub(r"\b(repo|project|projects|pipeline|branch|merge|commit)s?\b", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _build_project_bullets(context: PipelineContext) -> dict[str, list[str]]:
+    project_bullets: dict[str, list[str]] = {}
+    for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
+        combined: list[str] = []
+        for _, summary in repo_item.branch_rollups:
+            combined.extend(_extract_bullets(summary))
+        if repo_item.activity_rollup:
+            combined.extend(_extract_bullets(repo_item.activity_rollup))
+        project_bullets[repo_item.repo_display] = _dedupe_bullets(combined)
+    return project_bullets
+
+
+def _build_cross_project_updates(project_bullets: dict[str, list[str]]) -> tuple[list[str], set[str]]:
+    bucket: dict[str, list[tuple[str, str]]] = {}
+    for repo, bullets in project_bullets.items():
+        for bullet in bullets:
+            key = _normalize_for_cross_project(bullet)
+            if key:
+                bucket.setdefault(key, []).append((repo, bullet))
+
+    repeated = [(key, entries) for key, entries in bucket.items() if len(entries) >= 2]
+    repeated.sort(key=lambda item: (-len(item[1]), -_score_bullet(item[1][0][1]), item[0]))
+
+    lines: list[str] = []
+    used_keys: set[str] = set()
+    for key, entries in repeated[:8]:
+        used_keys.add(key)
+        sample = entries[0][1]
+        repos = sorted({repo for repo, _ in entries})
+        if len(repos) > 4:
+            repo_text = f"{len(repos)} repos ({', '.join(repos[:3])})"
+        else:
+            repo_text = ", ".join(repos)
+        lines.append(f"{sample} (repos: {repo_text})")
+    return lines[:8], used_keys
+
+
+def _build_overall_highlights(context: PipelineContext, cross_project_updates: list[str], project_bullets: dict[str, list[str]]) -> list[str]:
+    highlights: list[str] = []
+    if cross_project_updates:
+        highlights.append(f"Standardized updates were applied across {len(cross_project_updates)} shared change patterns, reducing repo drift.")
+
+    total_changes = sum(len(items) for items in project_bullets.values())
+    if total_changes:
+        highlights.append(f"Delivered {total_changes} concrete engineering updates across {len(project_bullets)} projects this week.")
+
+    high_signal_total = sum(1 for bullets in project_bullets.values() for b in bullets if _score_bullet(b) >= 5)
+    if high_signal_total:
+        highlights.append(f"{high_signal_total} high-impact changes landed in CI, runtime, API, or migration areas.")
+
+    action_count = sum(
+        1
+        for bullets in project_bullets.values()
+        for b in bullets
+        if any(tok in b.lower() for tok in ["migration", "manual", "action required", "failed", "error"])
+    )
+    if action_count:
+        highlights.append(f"{action_count} changes include explicit follow-up actions or operational checks.")
+
+    fallback = "Engineering delivery remained focused on deployability, runtime consistency, and concrete feature deltas."
+    return (highlights[:6] or [fallback])[:6]
+
+
+def _management_summary_from_bullets(bullets: list[str]) -> str:
+    if not bullets:
+        return "No material engineering changes were captured for this project."
+    top = _top_bullets(bullets, 2)
+    first = _clean_bullet(top[0]).rstrip(".")
+    if len(top) == 1:
+        return f"Primary outcome: {first}."
+    second = _clean_bullet(top[1]).rstrip(".")
+    return f"Primary outcome: {first}. Secondary outcome: {second}."
+
+
+def _action_needed(bullets: list[str], status: str) -> list[str]:
+    needs_action = [
+        b for b in bullets
+        if any(token in b.lower() for token in ["migration", "manual", "todo", "action required", "failed", "error", "config required"])
+    ]
+    if status == "SUCCESS":
+        needs_action = [b for b in needs_action if "verify pipeline" not in b.lower()]
+    return _top_bullets(_dedupe_bullets(needs_action), 3)
+
+
 def _sentence_from_bullets(bullets: list[str], limit: int) -> str:
     selected = bullets[:limit]
     if not selected:
@@ -334,59 +466,58 @@ def _render_weekly_email_html(context: PipelineContext, model: str, days: int) -
     duration_min = max(1, int(duration.total_seconds() // 60))
     status = "SUCCESS" if not context.errors else "SUCCESS (with warnings)"
 
+    project_bullets = _build_project_bullets(context)
+    cross_project_updates, cross_keys = _build_cross_project_updates(project_bullets)
+    overall_highlights = _build_overall_highlights(context, cross_project_updates, project_bullets)
+
     parts = [
         '<html><body style="font-family:Arial,Helvetica,sans-serif;color:#222;line-height:1.4">',
         '<h2 style="margin:0 0 8px">Weekly Engineering Summary</h2>',
         '<p style="margin:0 0 12px">'
         f"Generated: {generated}<br>"
         f"Window: last {days} days<br>"
-        f"Pipeline status: {status} · Duration: ~{duration_min} min · Projects: {len(context.projects)} · Branches analyzed: {context.branches_analyzed}"
-        + (f"<br>Model: {model}" if model and model != "disabled" else "")
+        f"Pipeline status: {status} · Duration: ~{duration_min} min<br>"
+        f"Projects analyzed: {len(context.projects)}"
         + "</p>",
-        "<h3>Overall Summary</h3>",
+        "<h3>Overall Highlights</h3>",
         "<ul>",
     ]
-    for bullet in _build_management_bullets(context)[:6]:
+    for bullet in overall_highlights[:6]:
         parts.append(f"<li>{bullet}</li>")
     parts.append("</ul>")
 
-    cross_cutting = _build_cross_cutting_notes(context)
-    if cross_cutting:
-        parts.append("<h3>Cross-cutting Notes</h3><ul>")
-        for note in cross_cutting:
+    if cross_project_updates:
+        parts.append("<h3>Cross-Project Updates</h3><ul>")
+        for note in cross_project_updates[:8]:
             parts.append(f"<li>{note}</li>")
         parts.append("</ul>")
 
-    for repo_item in context.repo_items:
-        combined: list[str] = []
-        for _, summary in repo_item.branch_rollups:
-            combined.extend(_extract_bullets(summary))
-        if repo_item.activity_rollup:
-            combined.extend(_extract_bullets(repo_item.activity_rollup))
-        combined = _dedupe_bullets(combined)
-        if not combined:
+    for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
+        combined = project_bullets.get(repo_item.repo_display, [])
+        filtered = [b for b in combined if _normalize_for_cross_project(b) not in cross_keys]
+        unique_details = _top_bullets(_dedupe_bullets(filtered), 6)
+        if not unique_details and not combined:
             continue
 
-        technical = _top_bullets(combined, 4)
-        major = _top_bullets(combined, 6)
-        action_needed = [
-            b for b in combined
-            if any(token in b.lower() for token in ["migration", "verify", "run", "smoke test", "upgrade", "action"])
-        ][:2]
+        key_changes = unique_details[:6] if unique_details else _top_bullets(combined, 2)
+        key_changes = key_changes[:6]
+        if len(key_changes) > 6:
+            key_changes = key_changes[:6]
+        if len(key_changes) < 2 and combined:
+            key_changes = _top_bullets(combined, 2)
+        key_changes = key_changes[:6]
 
         parts.append(f"<h3>{repo_item.repo_display}</h3>")
-        parts.append(f"<p><strong>Management summary:</strong> {_sentence_from_bullets(major, 2)}</p>")
-        parts.append("<p><strong>Technical summary:</strong></p><ul>")
-        for bullet in technical:
+        parts.append(f"<p><strong>Management Summary:</strong> {_management_summary_from_bullets(key_changes)}</p>")
+        parts.append("<p><strong>Key Changes:</strong></p><ul>")
+        for bullet in key_changes[:6]:
             parts.append(f"<li>{bullet}</li>")
         parts.append("</ul>")
-        parts.append("<p><strong>Major changes:</strong></p><ul>")
-        for bullet in major:
-            parts.append(f"<li>{bullet}</li>")
-        parts.append("</ul>")
-        if action_needed:
-            parts.append("<p><strong>Action needed:</strong></p><ul>")
-            for bullet in action_needed:
+
+        actions = _action_needed(key_changes, "SUCCESS" if not context.errors else "SUCCESS (with warnings)")
+        if actions:
+            parts.append("<p><strong>Action Needed:</strong></p><ul>")
+            for bullet in actions:
                 parts.append(f"<li>{bullet}</li>")
             parts.append("</ul>")
 
@@ -676,38 +807,60 @@ def build_master_summary(context: PipelineContext) -> None:
 
 
 def _render_weekly_markup(
-    model: str,
+    context: PipelineContext,
     days: int,
-    repo_sections: list[str],
-    master_summary: str,
-    activity_highlights: list[tuple[str, str]],
 ) -> str:
     stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    duration = dt.datetime.now(dt.timezone.utc) - context.started_at
+    duration_min = max(1, int(duration.total_seconds() // 60))
+    status = "SUCCESS" if not context.errors else "SUCCESS (with warnings)"
+    project_bullets = _build_project_bullets(context)
+    cross_project_updates, cross_keys = _build_cross_project_updates(project_bullets)
+    overall_highlights = _build_overall_highlights(context, cross_project_updates, project_bullets)
+
     header = [
         "# Weekly Engineering Summary",
         f"- Generated: {stamp}",
         f"- Window: last {days} days",
-        f"- Model: {model}",
+        f"- Pipeline status: {status} | Duration: ~{duration_min} min",
+        f"- Projects analyzed: {len(context.projects)}",
         "",
     ]
-    content = "\n".join(repo_sections)
-    activity_section = ["## Activity highlights"]
-    if activity_highlights:
-        for project_name, highlight in activity_highlights:
-            activity_section.append(f"- {project_name}: {highlight}")
-    else:
-        activity_section.append("- No project activity logs found in project_activity/.")
-    return "\n".join(header + ["## Master Summary", master_summary.strip(), ""] + activity_section + ["", content, ""])
+
+    lines = header + ["## Overall Highlights"]
+    for bullet in overall_highlights[:6]:
+        lines.append(f"- {bullet}")
+
+    if cross_project_updates:
+        lines.append("\n## Cross-Project Updates")
+        for bullet in cross_project_updates[:8]:
+            lines.append(f"- {bullet}")
+
+    for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
+        combined = project_bullets.get(repo_item.repo_display, [])
+        filtered = [b for b in combined if _normalize_for_cross_project(b) not in cross_keys]
+        key_changes = _top_bullets(_dedupe_bullets(filtered), 6)
+        if len(key_changes) < 2 and combined:
+            key_changes = _top_bullets(combined, 2)
+
+        lines.extend(["", f"## {repo_item.repo_display}", f"- Management Summary: {_management_summary_from_bullets(key_changes)}", "- Key Changes:"])
+        for bullet in key_changes[:6]:
+            lines.append(f"  - {bullet}")
+        actions = _action_needed(key_changes, status)
+        if actions:
+            lines.append("- Action Needed:")
+            for bullet in actions:
+                lines.append(f"  - {bullet}")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def render_outputs(context: PipelineContext) -> PipelineRunResult:
     _emit("RENDER", "writing weeklySummary.markup")
     weekly_markup = _render_weekly_markup(
-        context.ollama_client.model if context.ollama_client else "disabled",
+        context,
         context.days,
-        context.repo_sections,
-        context.master_summary,
-        context.activity_result.highlights_for_master,
     )
     weekly_file = context.out_dir / "weeklySummary.markup"
     weekly_file.write_text(weekly_markup, encoding="utf-8")

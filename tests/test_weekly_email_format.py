@@ -48,8 +48,8 @@ class WeeklyEmailFormatTests(unittest.TestCase):
         html = _render_weekly_email_html(context, model="qwen", days=10)
 
         self.assertEqual(html.count("Weekly Engineering Summary"), 1)
-        self.assertIn("Management summary", html)
-        self.assertIn("Technical summary", html)
+        self.assertIn("Management Summary", html)
+        self.assertIn("Key Changes", html)
         self.assertNotIn("da- tabase", html)
         self.assertNotIn("### Activity", html)
 
