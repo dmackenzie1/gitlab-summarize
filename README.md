@@ -68,7 +68,6 @@ Default behavior:
 - `--projects <path>`
 - `--days <n>`
 - `--out-dir <dir>`
-- `--no-ollama`
 - `--ollama-model <model>`
 - `--ollama-timeout <seconds>`
 - `--ollama-retries <n>`
