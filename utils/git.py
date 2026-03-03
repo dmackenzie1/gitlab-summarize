@@ -114,20 +114,20 @@ def diff_name_status(repo_dir: Path, base: str, head: str) -> List[str]:
     return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
 
-def diff_numstat(repo_dir: Path, base: str, head: str) -> List[Tuple[str, int]]:
+def diff_numstat(repo_dir: Path, base: str, head: str) -> List[Tuple[str, int, int]]:
     res = git(repo_dir, "diff", "--numstat", f"{base}..{head}")
     if not res.ok:
         return []
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, int, int]] = []
     for line in res.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) != 3 or parts[0] == "-" or parts[1] == "-":
             continue
         try:
-            out.append((parts[2], int(parts[0]) + int(parts[1])))
+            out.append((parts[2], int(parts[0]), int(parts[1])))
         except ValueError:
             pass
-    return sorted(out, key=lambda item: item[1], reverse=True)
+    return sorted(out, key=lambda item: item[1] + item[2], reverse=True)
 
 
 def diff_patch(repo_dir: Path, base: str, head: str, paths: List[str]) -> str:

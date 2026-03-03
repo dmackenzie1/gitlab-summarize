@@ -656,8 +656,8 @@ def process_repo_branches(context: PipelineContext) -> None:
             stat = diff_stat(repo_item.repo_dir, base, head)
             name_status = diff_name_status(repo_item.repo_dir, base, head)
             num = diff_numstat(repo_item.repo_dir, base, head)
-            additions = sum(row[1] for _, row in num)
-            deletions = sum(row[2] for _, row in num)
+            additions = sum(added for _, added, _ in num)
+            deletions = sum(deleted for _, _, deleted in num)
             repo_item.branch_change_stats.append((branch, len(num), additions, deletions))
 
             if patch_path.exists() and prompt_path.exists() and summary_path.exists() and not context.force_resummarize:
@@ -673,7 +673,7 @@ def process_repo_branches(context: PipelineContext) -> None:
                     repo_item.lines.append("- Summary unavailable (existing artifact contains error).")
                 continue
 
-            candidate_paths = [path for path, _ in num if not is_noisy_path(path)]
+            candidate_paths = [path for path, _, _ in num if not is_noisy_path(path)]
             chosen_paths = candidate_paths[: context.max_files_in_patch]
             changed_paths = [row.split("	")[-1] for row in name_status if "	" in row]
             version_paths = [path for path in changed_paths if path_is_version_signal(path)]
