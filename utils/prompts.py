@@ -17,10 +17,16 @@ BRANCH_SUMMARY_RETURN_SPEC = (
 REPO_ROLLUP_INTRO = [
     "You are producing a repo-level weekly rollup from branch summaries.",
     "Do not invent changes.",
+    "Prioritize leadership signal: architecture/runtime/CI/cross-repo consistency over small refactors.",
+    "Remove repetition across sections and collapse duplicate upgrades into one shared bullet.",
 ]
 
 REPO_ROLLUP_RETURN_SPEC = (
-    "\nReturn:\n- 4-10 bullet points\n- 0-5 risks/migrations\n- 0-5 significant build/version changes\n"
+    "\nReturn using this exact structure:\n"
+    "- Management Summary: 1-3 sentences (sentence 1 = main delivery, sentence 2 = leadership impact, sentence 3 optional = near-term awareness).\n"
+    "- Key Changes: 3-5 bullets max, only high-signal items.\n"
+    "- Action Needed: include only future-facing actions requiring coordination/blocker awareness; format each as 'What / When / Consequence'. Omit section if none.\n"
+    "- Shared Updates Note: if this repo matches an org-wide update (for example template/version bumps), use one short reference instead of repeating details.\n"
 )
 
 ACTIVITY_CHUNK_INTRO = "Summarize GitLab project activity. Focus on high-signal changes."
