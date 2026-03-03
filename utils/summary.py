@@ -330,10 +330,26 @@ def process_repo_branches(context: PipelineContext) -> None:
         for branch in repo_item.active_branches:
             _emit("BRANCH", f"{repo_item.repo_display} {branch}")
             safe_branch = branch.replace("/", "__")
+            patch_path = repo_item.repo_art_dir / f"{safe_branch}.patch.txt"
+            prompt_path = repo_item.repo_art_dir / f"{safe_branch}.prompt.txt"
+            summary_path = repo_item.repo_art_dir / f"{safe_branch}.summary.txt"
             if branch == repo_item.parent:
-                (repo_item.repo_art_dir / f"{safe_branch}.summary.txt").write_text(
+                summary_path.write_text(
                     "Baseline branch (parent). No diff computed.\n", encoding="utf-8"
                 )
+                continue
+
+            if patch_path.exists() and prompt_path.exists() and summary_path.exists():
+                existing_summary = summary_path.read_text(encoding="utf-8").strip()
+                _emit("BRANCH", f"{repo_item.repo_display} {branch} reused_existing_artifacts=true")
+                if existing_summary and not existing_summary.startswith("ERROR:"):
+                    repo_item.lines.append(f"### {branch}")
+                    repo_item.lines.append(existing_summary)
+                    repo_item.lines.append("")
+                    repo_item.branch_rollups.append((branch, existing_summary))
+                else:
+                    repo_item.lines.append(f"### {branch}")
+                    repo_item.lines.append("- Summary unavailable (existing artifact contains error).")
                 continue
 
             base = merge_base(repo_item.repo_dir, repo_item.parent, branch)
@@ -356,8 +372,8 @@ def process_repo_branches(context: PipelineContext) -> None:
                 context.max_prompt_chars,
                 suffix="\n\n[...prompt truncated...]\n",
             )
-            (repo_item.repo_art_dir / f"{safe_branch}.patch.txt").write_text(patch, encoding="utf-8")
-            (repo_item.repo_art_dir / f"{safe_branch}.prompt.txt").write_text(prompt, encoding="utf-8")
+            patch_path.write_text(patch, encoding="utf-8")
+            prompt_path.write_text(prompt, encoding="utf-8")
 
             summary_text: str | None = None
             if context.include_ollama:
@@ -425,13 +441,13 @@ def process_repo_branches(context: PipelineContext) -> None:
                         )
 
             if summary_text:
-                (repo_item.repo_art_dir / f"{safe_branch}.summary.txt").write_text(summary_text + "\n", encoding="utf-8")
+                summary_path.write_text(summary_text + "\n", encoding="utf-8")
                 repo_item.lines.append(f"### {branch}")
                 repo_item.lines.append(summary_text)
                 repo_item.lines.append("")
                 repo_item.branch_rollups.append((branch, summary_text))
             else:
-                (repo_item.repo_art_dir / f"{safe_branch}.summary.txt").write_text("ERROR: summary unavailable\n", encoding="utf-8")
+                summary_path.write_text("ERROR: summary unavailable\n", encoding="utf-8")
                 repo_item.lines.append(f"### {branch}")
                 repo_item.lines.append("- Summary unavailable (see artifacts/errors logs).")
 
