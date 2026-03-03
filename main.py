@@ -210,24 +210,32 @@ def branch_has_recent_commits(repo_dir: Path, branch: str, since: str) -> bool:
 
 def merge_base(repo_dir: Path, a: str, b: str) -> Optional[str]:
     res = git(repo_dir, "merge-base", a, b)
-    sha = res.stdout.strip() if res.ok else ""
-    return sha or None
+    if not res.ok:
+        logging.error(f"Failed to find merge base for {a} and {b}: {res.stderr.strip()}")
+        return None
+    return res.stdout.strip() or None
 
 
 def rev_parse(repo_dir: Path, ref: str) -> Optional[str]:
     res = git(repo_dir, "rev-parse", ref)
-    sha = res.stdout.strip() if res.ok else ""
-    return sha or None
+    if not res.ok:
+        logging.error(f"Failed to resolve ref {ref}: {res.stderr.strip()}")
+        return None
+    return res.stdout.strip() or None
 
 
 def diff_stat(repo_dir: Path, base: str, head: str) -> str:
     res = git(repo_dir, "diff", "--stat", f"{base}..{head}")
-    return res.stdout.strip() if res.ok else ""
+    if not res.ok:
+        logging.error(f"Failed to get diff stat for {base}..{head}: {res.stderr.strip()}")
+        return ""
+    return res.stdout.strip()
 
 
 def diff_name_status(repo_dir: Path, base: str, head: str) -> List[str]:
     res = git(repo_dir, "diff", "--name-status", f"{base}..{head}")
     if not res.ok:
+        logging.error(f"Failed to get diff name status for {base}..{head}: {res.stderr.strip()}")
         return []
     return [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
 
@@ -235,6 +243,7 @@ def diff_name_status(repo_dir: Path, base: str, head: str) -> List[str]:
 def diff_numstat(repo_dir: Path, base: str, head: str) -> List[Tuple[str, int]]:
     res = git(repo_dir, "diff", "--numstat", f"{base}..{head}")
     if not res.ok:
+        logging.error(f"Failed to get diff numstat for {base}..{head}: {res.stderr.strip()}")
         return []
     out: List[Tuple[str, int]] = []
     for ln in res.stdout.splitlines():
@@ -297,6 +306,7 @@ def extract_version_signals_from_files(repo_dir: Path, base: str, head: str, pat
     for p in paths:
         res = git(repo_dir, "diff", "--unified=0", f"{base}..{head}", "--", p)
         if not res.ok:
+            logging.error(f"Failed to extract version signals from {p}: {res.stderr.strip()}")
             continue
         for ln in res.stdout.splitlines():
             if not ln.startswith(("+", "-")) or ln.startswith(("+++", "---")):
@@ -327,36 +337,35 @@ def sanitize_prompt(text: str) -> str:
     return text
 
 
-def call_ollama(url: str, model: str, prompt: str, timeout_s: int = 600) -> Tuple[Optional[str], Optional[str]]:
+import time
+import random
+
+def call_ollama(url: str, model: str, prompt: str, timeout_s: int = 600, retries: int = 3, backoff_factor: float = 0.3) -> Tuple[Optional[str], Optional[str]]:
     payload = {"model": model, "stream": False, "prompt": prompt}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        return None, f"Ollama request failed: {e}"
-
-    try:
-        obj = json.loads(body)
-    except Exception:
-        snippet = body[:600] + ("..." if len(body) > 600 else "")
-        return None, f"Could not parse Ollama JSON response. Snippet: {snippet}"
-
-    text = obj.get("response", "")
-    if not isinstance(text, str) or not text.strip():
-        return None, "Ollama returned empty response"
-    return text.strip(), None
+    headers = {"Content-Type": "application/json"}
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(body)
+            text = obj.get("response", "")
+            if not isinstance(text, str) or not text.strip():
+                return None, "Ollama returned empty response"
+            return text.strip(), None
+        except Exception as e:
+            logging.error(f"Ollama request failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(backoff_factor * (2 ** attempt))
+            else:
+                return None, f"Ollama request failed after {retries} attempts: {e}"
+    return None, f"Ollama request failed after {retries} attempts"
 
 
 def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patch: str, version_signals: List[str]) -> str:
     vs = "\n".join(f"- {s}" for s in version_signals[:40]) or "(none detected)"
-    return sanitize_prompt(
+    prompt = (
         "You are summarizing code changes for a weekly engineering report.\n"
         "Use only the diff evidence provided; do NOT rely on commit messages/authors.\n\n"
         f"Repo: {repo}\n"
@@ -372,6 +381,7 @@ def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patc
         "- 0-3 bullet points: risks/breaking changes/migrations\n"
         "- 0-3 bullet points: notable version/build changes (only if significant)\n"
     )
+    return sanitize_prompt(prompt)
 
 
 def build_repo_rollup_prompt(repo: str, parent: str, branch_summaries: List[Tuple[str, str]]) -> str:
@@ -417,6 +427,8 @@ def read_monitored(path: Path, only_default: bool) -> List[dict]:
 # ----------------------------
 # Main generation
 # ----------------------------
+
+import os
 
 def generate(
     monitored_items: List[dict],
