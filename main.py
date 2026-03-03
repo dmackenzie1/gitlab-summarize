@@ -22,7 +22,7 @@ from utils.summary import (
 
 REMOTE_DEFAULT = "origin"
 OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
-OLLAMA_MODEL_DEFAULT = "qwen2.5-coder:32b"
+OLLAMA_MODEL_DEFAULT = "qwen3.5:9b"
 
 DAYS_DEFAULT = 10
 MAX_PROMPT_CHARS_DEFAULT = 120_000
