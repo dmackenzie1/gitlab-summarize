@@ -88,6 +88,30 @@ def _activity_events(payload: object) -> list[dict]:
     return []
 
 
+def _csv_rows_to_events(rows: list[dict[str, str]]) -> list[dict]:
+    events: list[dict] = []
+    for row in rows:
+        timestamp = row.get("timestamp") or row.get("created_at") or ""
+        actor = row.get("actor") or row.get("author") or row.get("author_username") or "unknown"
+        action = row.get("action_type") or row.get("action") or row.get("action_name") or "activity"
+        description = row.get("description") or row.get("summary") or row.get("title_or_text") or "(no details)"
+        project_id = row.get("project_id") or row.get("projectId") or ""
+        project_name = row.get("project_name") or row.get("projectName") or ""
+        url = row.get("url") or row.get("web_url") or ""
+        events.append(
+            {
+                "created_at": timestamp,
+                "author_username": actor,
+                "action_name": action,
+                "target_title": description,
+                "project_id": project_id,
+                "project_name": project_name,
+                "url": url,
+            }
+        )
+    return events
+
+
 def _event_author(event: dict) -> str:
     author = event.get("author")
     if isinstance(author, dict):
@@ -269,19 +293,34 @@ def process_activity_logs(
     project_rollup_inputs: dict[int | str, list[tuple[str, str]]] = {}
     project_name_lookup: dict[int | str, str] = {}
 
-    for source_file in sorted(activity_dir.glob("*.json")):
+    source_files = sorted(activity_dir.glob("*.json")) + sorted(activity_dir.glob("*.csv"))
+    for source_file in source_files:
         try:
-            payload = json.loads(source_file.read_text(encoding="utf-8"))
+            if source_file.suffix.lower() == ".json":
+                payload = json.loads(source_file.read_text(encoding="utf-8"))
+                events = _activity_events(payload)
+                project_id = _extract_project_id(payload, source_file)
+            else:
+                with source_file.open("r", encoding="utf-8", newline="") as f_csv:
+                    csv_rows = list(csv.DictReader(f_csv))
+                events = _csv_rows_to_events(csv_rows)
+                project_id = _extract_project_id(events, source_file)
+                payload = events
         except Exception as exc:  # noqa: BLE001
             ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
             (errors_dir / f"{ts}.unknown.{source_file.stem}.log").write_text(
                 json.dumps({"source_file": str(source_file), "error": str(exc)}, indent=2), encoding="utf-8"
             )
             continue
-
-        events = _activity_events(payload)
-        project_id = _extract_project_id(payload, source_file)
-        project_name = project_name_by_id.get(project_id or -1, f"project_{project_id}" if project_id is not None else "unknown_project")
+        inferred_project_name = ""
+        if events:
+            raw_name = events[0].get("project_name")
+            if isinstance(raw_name, str):
+                inferred_project_name = raw_name.strip()
+        project_name = project_name_by_id.get(
+            project_id or -1,
+            inferred_project_name or (f"project_{project_id}" if project_id is not None else "unknown_project"),
+        )
         source_slug = _slug(source_file.stem)
         project_slug = _slug(project_name if project_name != "unknown_project" else str(project_id or "unknown"))
 
