@@ -246,10 +246,23 @@ def _summarize_chunks(
     for i, summary in enumerate(chunk_summaries, 1):
         rollup_prompt.append(f"\n### Chunk {i}\n{summary}")
     merged_prompt = truncate("\n".join(rollup_prompt), max_prompt_chars, suffix="\n[...prompt truncated...]\n")
+    rollup_key = {
+        "scope": "activity_chunk_rollup",
+        "project": project_name,
+        "source": source_name,
+        "model": ollama_client.model,
+        "prompt": merged_prompt,
+    }
+    rollup_cache_file = cache_dir / f"{stable_json_hash(rollup_key)}.txt"
+    if rollup_cache_file.exists():
+        return rollup_cache_file.read_text(encoding="utf-8").strip(), None, chunk_errors
+
     result = ollama_client.generate(merged_prompt)
     if result.error:
         return None, result.error.message, chunk_errors
-    return (result.text or "").strip(), None, chunk_errors
+    rollup_text = (result.text or "").strip()
+    rollup_cache_file.write_text(rollup_text + "\n", encoding="utf-8")
+    return rollup_text, None, chunk_errors
 
 
 def process_activity_logs(
@@ -362,19 +375,12 @@ def process_activity_logs(
         meta_path = artifacts_dir / f"{project_slug}.{source_slug}.metadata.json"
         summary_path = artifacts_dir / f"{project_slug}.{source_slug}.activity.summary.md"
 
-        if csv_path.exists() and jsonl_path.exists() and meta_path.exists() and summary_path.exists():
-            try:
-                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                metadata = {}
-            metadata_input = str(metadata.get("input_file", ""))
-            metadata_days = metadata.get("window_days_used")
-            if metadata_input == str(source_file) and metadata_days == days:
-                summary_text = summary_path.read_text(encoding="utf-8").strip()
-                project_rollup_inputs.setdefault(project_name, []).append((source_file.name, summary_text))
-                if log_item is not None:
-                    log_item(f"project={project_name} source={source_file.name} reused_existing_artifacts=true")
-                continue
+        if summary_path.exists():
+            summary_text = summary_path.read_text(encoding="utf-8").strip()
+            project_rollup_inputs.setdefault(project_name, []).append((source_file.name, summary_text))
+            if log_item is not None:
+                log_item(f"project={project_name} source={source_file.name} reused_existing_summary=true")
+            continue
 
         fieldnames = [
             "created_at",
@@ -485,6 +491,18 @@ def process_activity_logs(
     for project_name, summaries in project_rollup_inputs.items():
         project_slug = _slug(project_name)
         rollup_path = artifacts_dir / f"{project_slug}.activity.rollup.md"
+        if rollup_path.exists():
+            rollup_text = rollup_path.read_text(encoding="utf-8").strip() + "\n"
+            rollups_by_name[project_name] = rollup_text
+            first_highlight = "No highlights available"
+            for line in rollup_text.splitlines():
+                token = line.strip()
+                if token.startswith("- "):
+                    first_highlight = token[2:].strip()
+                    break
+            highlights.append((project_name, first_highlight))
+            continue
+
         lines = [f"# Activity rollup: {project_name}", ""]
         for source_name, summary_text in summaries:
             lines.append(f"## Source: {source_name}")
