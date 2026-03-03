@@ -28,6 +28,7 @@ from utils.git import (
 from utils.ollama import OllamaClient
 from utils.parsing import (
     chunk_text,
+    coerce_text,
     is_noisy_path,
     path_is_version_signal,
     sanitize_prompt,
@@ -177,11 +178,12 @@ def generate_weekly_summary(
         cp = _cache_path(prompt_cache_dir, cache_key)
         if cp.exists():
             return cp.read_text(encoding="utf-8"), None
-        result = ollama_client.generate(prompt)
+        result = ollama_client.generate(sanitize_prompt(prompt))
         if result.error:
             return None, result.error.message
-        cp.write_text(result.text + "\n", encoding="utf-8")
-        return result.text, None
+        cleaned = sanitize_prompt(coerce_text(result.text)).strip()
+        cp.write_text(cleaned + "\n", encoding="utf-8")
+        return cleaned, None
 
     repo_sections: list[str] = []
     repo_rollups: list[tuple[str, str]] = []

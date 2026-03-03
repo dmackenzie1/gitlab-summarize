@@ -26,3 +26,13 @@ python main.py --monitored data/monitored.json --days 10 --out-dir out
 See `architecture.md` for module responsibilities and data flow.
 
 `main.py` is the single supported entrypoint for summary generation.
+
+## Troubleshooting
+
+- **`TypeError: object of NoneType has no len()` around `truncate(...)`**  
+  The parser now coerces `None` and bytes to safe strings before truncation/sanitization. If you still see this, check custom callers that bypass `utils.parsing`.
+- **Unicode decode errors from git output (for example `charmap` / byte decode failures)**  
+  Git subprocess output is decoded as UTF-8 with replacement (`errors="replace"`) to prevent crashes on mixed encodings.
+- **LLM prompt/response sanitation**  
+  Prompts and model responses are normalized to text and cleaned of control characters before cache/write steps.
+
