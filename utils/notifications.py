@@ -6,12 +6,19 @@ import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
 import html
+import os
 from pathlib import Path
 
-SMTP_HOST = "ndc-relay.ndc.nasa.gov"
-SMTP_PORT = 25
-EMAIL_FROM = "emss-no-reply@mail.nasa.gov"
-EMAIL_TO = "david.l.mackenzie@nasa.gov"
+
+def _csv_env(name: str, default: str) -> str:
+    raw = os.getenv(name, default)
+    return ", ".join([item.strip() for item in raw.split(",") if item.strip()])
+
+
+SMTP_HOST = os.getenv("SMTP_HOST", "ndc-relay.ndc.nasa.gov")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "25"))
+EMAIL_FROM = os.getenv("EMAIL_FROM", "emss-no-reply@mail.nasa.gov")
+EMAIL_TO = _csv_env("SMTP_TO", "david.l.mackenzie@nasa.gov")
 
 
 @dataclass

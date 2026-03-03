@@ -35,7 +35,17 @@ Place one or more exported activity files in `project_activity/`.
 
 For GitLab native events JSON, the pipeline also accepts `created_at`, author/action variants, and embedded event payload fields.
 
-### 3) Run the pipeline
+### 3) Environment configuration
+
+Copy `.env.example` to `.env` and update values as needed.
+
+```bash
+cp .env.example .env
+```
+
+Supported settings include Ollama model/timeout, summary sizing caps, and SMTP delivery config (`SMTP_TO` accepts a comma-separated list).
+
+### 4) Run the pipeline
 
 ```bash
 python main.py --projects data/projects.json --out-dir out
@@ -64,16 +74,13 @@ Default behavior:
 - `--ollama-retries <n>`
 - `--ollama-keep-alive 5m`
 - `--max-files <n>` / `--max-patch-chars <n>` / `--max-prompt-chars <n>`
+- `--resummarize` (reuse saved patch artifacts, regenerate prompts, and resave summaries)
 
 ## Completion email
 
 On both success and failure, the pipeline sends a completion email with start/end/duration, project and branch counts, artifact location, and error details when present.
 
-SMTP settings:
-- host: `ndc_relay.ndc.nasa.gov`
-- port: `25`
-- from: `emss-no-reply@mail.nasa.gov`
-- to: `david.l.mackenzie@nasa.gov`
+SMTP settings are read from `.env` (`SMTP_HOST`, `SMTP_PORT`, `EMAIL_FROM`, `SMTP_TO`).
 
 If SMTP send fails, the pipeline logs a warning and does not crash.
 

@@ -4,7 +4,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from utils.notifications import PipelineEmailNotification, send_pipeline_completion_email
 from utils.ollama import OllamaClient
@@ -21,14 +26,16 @@ from utils.summary import (
 )
 
 REMOTE_DEFAULT = "origin"
-OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
-OLLAMA_MODEL_DEFAULT = "qwen3.5:9b"
+OLLAMA_URL_DEFAULT = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL_DEFAULT = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 
-DAYS_DEFAULT = 10
-MAX_PROMPT_CHARS_DEFAULT = 120_000
-MAX_PATCH_CHARS_DEFAULT = 90_000
-MAX_FILES_IN_PATCH_DEFAULT = 40
-OLLAMA_KEEP_ALIVE_DEFAULT = "5m"
+DAYS_DEFAULT = int(os.getenv("DAYS", "10"))
+MAX_PROMPT_CHARS_DEFAULT = int(os.getenv("MAX_PROMPT_CHARS", "120000"))
+MAX_PATCH_CHARS_DEFAULT = int(os.getenv("MAX_PATCH_CHARS", "90000"))
+MAX_FILES_IN_PATCH_DEFAULT = int(os.getenv("MAX_FILES_IN_PATCH", "40"))
+OLLAMA_KEEP_ALIVE_DEFAULT = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
+OLLAMA_TIMEOUT_DEFAULT = int(os.getenv("OLLAMA_TIMEOUT", "240"))
+OLLAMA_RETRIES_DEFAULT = int(os.getenv("OLLAMA_RETRIES", "3"))
 
 
 def setup_logging() -> None:
@@ -48,13 +55,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-ollama", action="store_true", help="Skip LLM summarization and only produce git/activity artifacts")
     parser.add_argument("--ollama-url", default=OLLAMA_URL_DEFAULT)
     parser.add_argument("--ollama-model", default=OLLAMA_MODEL_DEFAULT)
-    parser.add_argument("--ollama-timeout", type=int, default=240)
-    parser.add_argument("--ollama-retries", type=int, default=3)
+    parser.add_argument("--ollama-timeout", type=int, default=OLLAMA_TIMEOUT_DEFAULT)
+    parser.add_argument("--ollama-retries", type=int, default=OLLAMA_RETRIES_DEFAULT)
     parser.add_argument("--ollama-keep-alive", default=OLLAMA_KEEP_ALIVE_DEFAULT, help="Ollama keep_alive value")
 
     parser.add_argument("--max-patch-chars", type=int, default=MAX_PATCH_CHARS_DEFAULT)
     parser.add_argument("--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS_DEFAULT)
     parser.add_argument("--max-files", type=int, default=MAX_FILES_IN_PATCH_DEFAULT)
+    parser.add_argument("--resummarize", action="store_true", help="Rebuild prompts and summaries from saved patch artifacts")
     return parser.parse_args()
 
 
@@ -86,6 +94,7 @@ def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient | None) 
         max_patch_chars=args.max_patch_chars,
         max_prompt_chars=args.max_prompt_chars,
         max_files_in_patch=args.max_files,
+        force_resummarize=args.resummarize,
     )
     process_activity_stage(context)
     sync_repos(context)

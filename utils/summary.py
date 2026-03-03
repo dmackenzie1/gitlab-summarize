@@ -68,6 +68,8 @@ class RepoWorkItem:
     parent: str = ""
     active_branches: list[str] = field(default_factory=list)
     branch_rollups: list[tuple[str, str]] = field(default_factory=list)
+    branch_change_stats: list[tuple[str, int, int, int]] = field(default_factory=list)
+    merge_count: int = 0
 
 
 @dataclass
@@ -83,6 +85,7 @@ class PipelineContext:
     max_patch_chars: int
     max_prompt_chars: int
     max_files_in_patch: int
+    force_resummarize: bool
     artifacts_root: Path
     prompt_cache_dir: Path
     errors_dir: Path
@@ -141,6 +144,7 @@ def init_pipeline_context(
     max_patch_chars: int,
     max_prompt_chars: int,
     max_files_in_patch: int,
+    force_resummarize: bool,
 ) -> PipelineContext:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts_root = out_dir / "artifacts"
@@ -163,6 +167,7 @@ def init_pipeline_context(
         max_patch_chars=max_patch_chars,
         max_prompt_chars=max_prompt_chars,
         max_files_in_patch=max_files_in_patch,
+        force_resummarize=force_resummarize,
         artifacts_root=artifacts_root,
         prompt_cache_dir=prompt_cache_dir,
         errors_dir=errors_dir,
@@ -382,29 +387,34 @@ def _build_cross_project_updates(project_bullets: dict[str, list[str]]) -> tuple
     return lines[:8], used_keys
 
 
+def _is_version_or_library_update(text: str) -> bool:
+    lowered = text.lower()
+    markers = ["version", "upgrade", "bump", "dependency", "dependencies", "node", "python", "npm", "library"]
+    return any(marker in lowered for marker in markers) or bool(re.search(r"\bv?\d+\.\d+(\.\d+)?\b", lowered))
+
+
 def _build_overall_highlights(context: PipelineContext, cross_project_updates: list[str], project_bullets: dict[str, list[str]]) -> list[str]:
     highlights: list[str] = []
-    if cross_project_updates:
-        highlights.append(f"Standardized updates were applied across {len(cross_project_updates)} shared change patterns, reducing repo drift.")
+    active_branch_total = sum(len(item.active_branches) for item in context.repo_items)
+    if active_branch_total:
+        highlights.append(f"{active_branch_total} active branches were analyzed across {len(project_bullets)} projects this week.")
 
-    total_changes = sum(len(items) for items in project_bullets.values())
-    if total_changes:
-        highlights.append(f"Delivered {total_changes} concrete engineering updates across {len(project_bullets)} projects this week.")
+    merge_total = sum(item.merge_count for item in context.repo_items)
+    if merge_total:
+        highlights.append(f"{merge_total} merge commits landed in the reporting window.")
 
-    high_signal_total = sum(1 for bullets in project_bullets.values() for b in bullets if _score_bullet(b) >= 5)
-    if high_signal_total:
-        highlights.append(f"{high_signal_total} high-impact changes landed in CI, runtime, API, or migration areas.")
+    branch_deltas = [entry + (item.repo_display,) for item in context.repo_items for entry in item.branch_change_stats]
+    if branch_deltas:
+        branch, files_changed, adds, deletes, repo = max(branch_deltas, key=lambda row: row[2] + row[3])
+        highlights.append(
+            f"Largest code delta: {repo} {branch} touched {files_changed} files with {adds + deletes} total line changes ({adds} additions, {deletes} deletions)."
+        )
 
-    action_count = sum(
-        1
-        for bullets in project_bullets.values()
-        for b in bullets
-        if any(tok in b.lower() for tok in ["migration", "manual", "action required", "failed", "error"])
-    )
-    if action_count:
-        highlights.append(f"{action_count} changes include explicit follow-up actions or operational checks.")
+    shared_versions = [line for line in cross_project_updates if _is_version_or_library_update(line)]
+    if shared_versions:
+        highlights.append(f"Shared version/library updates: {len(shared_versions)} patterns repeated across repos.")
 
-    fallback = "Engineering delivery remained focused on deployability, runtime consistency, and concrete feature deltas."
+    fallback = "Engineering delivery focused on meaningful runtime, API, and deployment changes this week."
     return (highlights[:6] or [fallback])[:6]
 
 
@@ -412,11 +422,15 @@ def _management_summary_from_bullets(bullets: list[str]) -> str:
     if not bullets:
         return "No material engineering changes were captured for this project."
     top = _top_bullets(bullets, 2)
-    first = _clean_bullet(top[0]).rstrip(".")
     if len(top) == 1:
-        return f"Primary outcome: {first}."
-    second = _clean_bullet(top[1]).rstrip(".")
-    return f"Primary outcome: {first}. Secondary outcome: {second}."
+        return _clean_bullet(top[0]).rstrip(".") + "."
+    return _sentence_from_bullets([_clean_bullet(top[0]), _clean_bullet(top[1])], 2)
+
+
+def _important_unique_bullets(bullets: list[str], limit: int) -> list[str]:
+    ranked = _top_bullets(_dedupe_bullets(bullets), max(limit * 2, limit))
+    important = [b for b in ranked if _score_bullet(b) >= 3]
+    return (important or ranked)[:limit]
 
 
 def _action_needed(bullets: list[str], status: str) -> list[str]:
@@ -486,31 +500,28 @@ def _render_weekly_email_html(context: PipelineContext, model: str, days: int) -
         parts.append(f"<li>{bullet}</li>")
     parts.append("</ul>")
 
-    if cross_project_updates:
-        parts.append("<h3>Cross-Project Updates</h3><ul>")
-        for note in cross_project_updates[:8]:
+    shared_version_updates = [note for note in cross_project_updates if _is_version_or_library_update(note)]
+    if shared_version_updates:
+        parts.append("<h3>Shared Library/Version Updates</h3><ul>")
+        for note in shared_version_updates[:6]:
             parts.append(f"<li>{note}</li>")
         parts.append("</ul>")
 
     for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
         combined = project_bullets.get(repo_item.repo_display, [])
         filtered = [b for b in combined if _normalize_for_cross_project(b) not in cross_keys]
-        unique_details = _top_bullets(_dedupe_bullets(filtered), 6)
+        unique_details = _important_unique_bullets(filtered, 5)
         if not unique_details and not combined:
             continue
 
-        key_changes = unique_details[:6] if unique_details else _top_bullets(combined, 2)
-        key_changes = key_changes[:6]
-        if len(key_changes) > 6:
-            key_changes = key_changes[:6]
+        key_changes = unique_details if unique_details else _important_unique_bullets(combined, 3)
         if len(key_changes) < 2 and combined:
-            key_changes = _top_bullets(combined, 2)
-        key_changes = key_changes[:6]
+            key_changes = _important_unique_bullets(combined, 2)
 
         parts.append(f"<h3>{repo_item.repo_display}</h3>")
         parts.append(f"<p><strong>Management Summary:</strong> {_management_summary_from_bullets(key_changes)}</p>")
         parts.append("<p><strong>Key Changes:</strong></p><ul>")
-        for bullet in key_changes[:6]:
+        for bullet in key_changes[:5]:
             parts.append(f"<li>{bullet}</li>")
         parts.append("</ul>")
 
@@ -588,6 +599,7 @@ def sync_repos(context: PipelineContext) -> None:
         _emit("REPO", f"{repo_display} active_branches={len(active)}")
 
         merges = recent_merge_commits(repo_dir, days=context.days)
+        work_item.merge_count = len(merges)
         if merges:
             work_item.lines.append("- Recent merge commits:")
             for m in merges[:8]:
@@ -597,7 +609,7 @@ def sync_repos(context: PipelineContext) -> None:
 
 
 
-def _call_or_cache(context: PipelineContext, prompt: str, scope: dict) -> tuple[str | None, str | None]:
+def _call_or_cache(context: PipelineContext, prompt: str, scope: dict, force_refresh: bool = False) -> tuple[str | None, str | None]:
     if not context.include_ollama or context.ollama_client is None:
         return None, None
     key = {
@@ -609,7 +621,7 @@ def _call_or_cache(context: PipelineContext, prompt: str, scope: dict) -> tuple[
         "prompt": prompt,
     }
     cpath = _cache_path(context.prompt_cache_dir, key)
-    if cpath.exists():
+    if cpath.exists() and not force_refresh:
         return cpath.read_text(encoding="utf-8"), None
     result = context.ollama_client.generate(prompt)
     if result.error:
@@ -636,7 +648,19 @@ def process_repo_branches(context: PipelineContext) -> None:
                 )
                 continue
 
-            if patch_path.exists() and prompt_path.exists() and summary_path.exists():
+            base = merge_base(repo_item.repo_dir, repo_item.parent, branch)
+            head = rev_parse(repo_item.repo_dir, branch)
+            if not base or not head:
+                continue
+
+            stat = diff_stat(repo_item.repo_dir, base, head)
+            name_status = diff_name_status(repo_item.repo_dir, base, head)
+            num = diff_numstat(repo_item.repo_dir, base, head)
+            additions = sum(row[1] for _, row in num)
+            deletions = sum(row[2] for _, row in num)
+            repo_item.branch_change_stats.append((branch, len(num), additions, deletions))
+
+            if patch_path.exists() and prompt_path.exists() and summary_path.exists() and not context.force_resummarize:
                 existing_summary = summary_path.read_text(encoding="utf-8").strip()
                 _emit("BRANCH", f"{repo_item.repo_display} {branch} reused_existing_artifacts=true")
                 if existing_summary and not existing_summary.startswith("ERROR:"):
@@ -649,27 +673,23 @@ def process_repo_branches(context: PipelineContext) -> None:
                     repo_item.lines.append("- Summary unavailable (existing artifact contains error).")
                 continue
 
-            base = merge_base(repo_item.repo_dir, repo_item.parent, branch)
-            head = rev_parse(repo_item.repo_dir, branch)
-            if not base or not head:
-                continue
-
-            stat = diff_stat(repo_item.repo_dir, base, head)
-            name_status = diff_name_status(repo_item.repo_dir, base, head)
-            num = diff_numstat(repo_item.repo_dir, base, head)
             candidate_paths = [path for path, _ in num if not is_noisy_path(path)]
             chosen_paths = candidate_paths[: context.max_files_in_patch]
-            changed_paths = [row.split("\t")[-1] for row in name_status if "\t" in row]
+            changed_paths = [row.split("	")[-1] for row in name_status if "	" in row]
             version_paths = [path for path in changed_paths if path_is_version_signal(path)]
             version_signals = extract_version_signals(repo_item.repo_dir, base, head, version_paths)
-            patch = truncate(diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
+
+            if context.force_resummarize and patch_path.exists():
+                patch = truncate(patch_path.read_text(encoding="utf-8"), context.max_patch_chars)
+            else:
+                patch = truncate(diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
+                patch_path.write_text(patch, encoding="utf-8")
 
             prompt = truncate(
                 build_branch_prompt(repo_item.repo_display, branch, repo_item.parent, stat, patch, version_signals),
                 context.max_prompt_chars,
                 suffix="\n\n[...prompt truncated...]\n",
             )
-            patch_path.write_text(patch, encoding="utf-8")
             prompt_path.write_text(prompt, encoding="utf-8")
 
             summary_text: str | None = None
@@ -687,7 +707,12 @@ def process_repo_branches(context: PipelineContext) -> None:
                             version_signals,
                         )
                         chunk_prompt = truncate(chunk_prompt, context.max_prompt_chars, suffix="\n\n[...prompt truncated...]\n")
-                        chunk_summary, chunk_err = _call_or_cache(context, chunk_prompt, {"repo": repo_item.repo_display, "branch": branch, "chunk": i})
+                        chunk_summary, chunk_err = _call_or_cache(
+                            context,
+                            chunk_prompt,
+                            {"repo": repo_item.repo_display, "branch": branch, "chunk": i},
+                            force_refresh=context.force_resummarize,
+                        )
                         if chunk_err:
                             summary_text = None
                             ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -714,11 +739,17 @@ def process_repo_branches(context: PipelineContext) -> None:
                             context,
                             merged_prompt,
                             {"repo": repo_item.repo_display, "branch": branch, "stage": "chunk_rollup"},
+                            force_refresh=context.force_resummarize,
                         )
                         if final_err:
                             summary_text = None
                 else:
-                    summary_text, call_err = _call_or_cache(context, prompt, {"repo": repo_item.repo_display, "branch": branch})
+                    summary_text, call_err = _call_or_cache(
+                        context,
+                        prompt,
+                        {"repo": repo_item.repo_display, "branch": branch},
+                        force_refresh=context.force_resummarize,
+                    )
                     if call_err:
                         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
                         (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}.log").write_text(
@@ -759,7 +790,7 @@ def build_rollups(context: PipelineContext) -> None:
                 suffix="\n\n[...prompt truncated...]\n",
             )
             (repo_item.repo_art_dir / "repo_rollup.prompt.txt").write_text(rollup_prompt, encoding="utf-8")
-            rollup, rollup_err = _call_or_cache(context, rollup_prompt, {"repo": repo_item.repo_display, "stage": "repo_rollup"})
+            rollup, rollup_err = _call_or_cache(context, rollup_prompt, {"repo": repo_item.repo_display, "stage": "repo_rollup"}, force_refresh=context.force_resummarize)
             if rollup:
                 (repo_item.repo_art_dir / "repo_rollup.summary.txt").write_text(rollup + "\n", encoding="utf-8")
                 context.project_summaries_for_master.append((repo_item.repo_display, rollup))
@@ -791,7 +822,7 @@ def build_master_summary(context: PipelineContext) -> None:
         "prompt": master_prompt,
     }
     cpath = _cache_path(context.prompt_cache_dir, key)
-    if cpath.exists():
+    if cpath.exists() and not context.force_resummarize:
         context.master_summary = cpath.read_text(encoding="utf-8").strip()
         (context.artifacts_root / "master_summary.summary.txt").write_text(context.master_summary + "\n", encoding="utf-8")
         return
@@ -831,20 +862,21 @@ def _render_weekly_markup(
     for bullet in overall_highlights[:6]:
         lines.append(f"- {bullet}")
 
-    if cross_project_updates:
-        lines.append("\n## Cross-Project Updates")
-        for bullet in cross_project_updates[:8]:
+    shared_version_updates = [note for note in cross_project_updates if _is_version_or_library_update(note)]
+    if shared_version_updates:
+        lines.append("\n## Shared Library/Version Updates")
+        for bullet in shared_version_updates[:6]:
             lines.append(f"- {bullet}")
 
     for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
         combined = project_bullets.get(repo_item.repo_display, [])
         filtered = [b for b in combined if _normalize_for_cross_project(b) not in cross_keys]
-        key_changes = _top_bullets(_dedupe_bullets(filtered), 6)
+        key_changes = _important_unique_bullets(filtered, 5)
         if len(key_changes) < 2 and combined:
-            key_changes = _top_bullets(combined, 2)
+            key_changes = _important_unique_bullets(combined, 2)
 
         lines.extend(["", f"## {repo_item.repo_display}", f"- Management Summary: {_management_summary_from_bullets(key_changes)}", "- Key Changes:"])
-        for bullet in key_changes[:6]:
+        for bullet in key_changes[:5]:
             lines.append(f"  - {bullet}")
         actions = _action_needed(key_changes, status)
         if actions:
