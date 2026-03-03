@@ -362,6 +362,20 @@ def process_activity_logs(
         meta_path = artifacts_dir / f"{project_slug}.{source_slug}.metadata.json"
         summary_path = artifacts_dir / f"{project_slug}.{source_slug}.activity.summary.md"
 
+        if csv_path.exists() and jsonl_path.exists() and meta_path.exists() and summary_path.exists():
+            try:
+                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                metadata = {}
+            metadata_input = str(metadata.get("input_file", ""))
+            metadata_days = metadata.get("window_days_used")
+            if metadata_input == str(source_file) and metadata_days == days:
+                summary_text = summary_path.read_text(encoding="utf-8").strip()
+                project_rollup_inputs.setdefault(project_name, []).append((source_file.name, summary_text))
+                if log_item is not None:
+                    log_item(f"project={project_name} source={source_file.name} reused_existing_artifacts=true")
+                continue
+
         fieldnames = [
             "created_at",
             "author",
