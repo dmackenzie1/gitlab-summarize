@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from utils.activity_logs import ActivitySummaryResult, process_activity_logs
+from utils.activity_logs import process_activity_logs
 from utils.git import (
     branch_has_recent_commits,
     diff_name_status,
@@ -26,17 +26,18 @@ from utils.git import (
     repo_dir_name_from_project,
     rev_parse,
 )
+from utils.models import ActivitySummaryResult
 from utils.ollama import OllamaClient
 from utils.parsing import (
     chunk_text,
     coerce_text,
     is_noisy_path,
     path_is_version_signal,
-    sanitize_prompt,
     stable_json_hash,
     truncate,
     unique_preserve_order,
 )
+from utils.prompts import build_branch_prompt, build_repo_rollup_prompt
 
 _VERSION_PATTERNS = [
     re.compile(r"\bnode\b[^\n]*\b(\d+\.\d+\.\d+|\d+)\b", re.IGNORECASE),
@@ -193,35 +194,6 @@ def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[st
                 signals.append(f"{path}: {text[:240]}")
     return unique_preserve_order(signals)
 
-
-def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patch: str, version_signals: list[str]) -> str:
-    vs = "\n".join(f"- {entry}" for entry in version_signals[:40]) or "(none detected)"
-    return sanitize_prompt(
-        "You are summarizing code changes for a weekly engineering report.\n"
-        "Use only the diff evidence provided; do NOT rely on commit messages/authors.\n\n"
-        f"Repo: {repo}\nBranch: {branch}\nParent baseline: {parent}\n\n"
-        f"DIFFSTAT:\n{diffstat}\n\n"
-        f"VERSION/BUILD SIGNALS:\n{vs}\n\n"
-        f"PATCH (curated; may be truncated):\n{patch}\n\n"
-        "Return:\n"
-        "- 3-8 bullet points: behavior/capability changes\n"
-        "- 0-3 bullet points: risks/breaking changes\n"
-        "- 0-3 bullet points: significant version/build changes\n"
-    )
-
-
-def build_repo_rollup_prompt(repo: str, branch_summaries: list[tuple[str, str]]) -> str:
-    parts = [
-        "You are producing a repo-level weekly rollup from branch summaries.",
-        "Do not invent changes.",
-        f"Repo: {repo}",
-        "",
-        "BRANCH SUMMARIES:",
-    ]
-    for branch, summary in branch_summaries:
-        parts.append(f"\n### {branch}\n{summary.strip()}\n")
-    parts.append("\nReturn:\n- 4-10 bullet points\n- 0-5 risks/migrations\n- 0-5 significant build/version changes\n")
-    return sanitize_prompt("\n".join(parts))
 
 
 def _cache_path(cache_root: Path, key: dict) -> Path:

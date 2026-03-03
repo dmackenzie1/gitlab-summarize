@@ -4,21 +4,16 @@ import csv
 import datetime as dt
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from utils.models import ActivitySummaryResult
 from utils.ollama import OllamaClient
 from utils.parsing import sanitize_prompt, stable_json_hash, truncate
+from utils.prompts import build_activity_chunk_prompt, build_activity_rollup_prompt
 
 MAX_TEXT_FIELD_CHARS = 700
 ACTIVITY_CHUNK_ROWS = 200
-
-
-@dataclass
-class ActivitySummaryResult:
-    rollups_by_project_name: dict[str, str]
-    highlights_for_master: list[tuple[str, str]]
 
 
 def _slug(text: str) -> str:
@@ -198,19 +193,11 @@ def _summarize_chunks(
 
     for idx in range(0, len(rows), ACTIVITY_CHUNK_ROWS):
         chunk_rows = rows[idx : idx + ACTIVITY_CHUNK_ROWS]
-        body = [
-            "Summarize GitLab project activity. Focus on high-signal changes.",
-            f"Project: {project_name}",
-            f"Source: {source_name}",
-            f"Chunk: {idx // ACTIVITY_CHUNK_ROWS + 1}",
-            "",
-        ]
-        for event in chunk_rows:
-            body.append(
-                f"- {event['created_at'] or 'unknown_date'} | {event['author']} | {event['action']} | "
-                f"{event['title_or_text']} | {event['url']}"
-            )
-        prompt = truncate("\n".join(body), max_prompt_chars, suffix="\n[...prompt truncated...]\n")
+        prompt = truncate(
+            build_activity_chunk_prompt(project_name, source_name, idx // ACTIVITY_CHUNK_ROWS + 1, chunk_rows),
+            max_prompt_chars,
+            suffix="\n[...prompt truncated...]\n",
+        )
         key = {
             "scope": "activity_chunk",
             "project": project_name,
@@ -237,15 +224,11 @@ def _summarize_chunks(
     if len(chunk_summaries) == 1:
         return chunk_summaries[0], None, chunk_errors
 
-    rollup_prompt = [
-        "Create a concise project activity summary from chunk summaries.",
-        f"Project: {project_name}",
-        f"Source: {source_name}",
-        "Return sections: Activity highlights, MRs / merges, Notable discussions/comments, Other activity.",
-    ]
-    for i, summary in enumerate(chunk_summaries, 1):
-        rollup_prompt.append(f"\n### Chunk {i}\n{summary}")
-    merged_prompt = truncate("\n".join(rollup_prompt), max_prompt_chars, suffix="\n[...prompt truncated...]\n")
+    merged_prompt = truncate(
+        build_activity_rollup_prompt(project_name, source_name, chunk_summaries),
+        max_prompt_chars,
+        suffix="\n[...prompt truncated...]\n",
+    )
     rollup_key = {
         "scope": "activity_chunk_rollup",
         "project": project_name,
