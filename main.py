@@ -8,7 +8,17 @@ from pathlib import Path
 
 from utils.notifications import PipelineEmailNotification, send_pipeline_completion_email
 from utils.ollama import OllamaClient
-from utils.summary import PipelineRunResult, read_projects, run_summary_pipeline
+from utils.summary import (
+    PipelineRunResult,
+    build_master_summary,
+    build_rollups,
+    init_pipeline_context,
+    load_config,
+    process_activity_stage,
+    process_repo_branches,
+    render_outputs,
+    sync_repos,
+)
 
 REMOTE_DEFAULT = "origin"
 OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
@@ -27,7 +37,7 @@ def setup_logging() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Weekly project summary pipeline")
-    parser.add_argument("--projects", default="data/projects.json", help="Path to projects.json")
+    parser.add_argument("--projects", default="data/monitored.json", help="Path to monitored repositories JSON")
     parser.add_argument("--only-default", action="store_true", help="Only include entries where is_default=true")
     parser.add_argument("--days", type=int, default=DAYS_DEFAULT)
 
@@ -63,11 +73,8 @@ def _build_ollama_client(args: argparse.Namespace) -> OllamaClient | None:
 
 
 def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient | None) -> PipelineRunResult:
-    logging.info("Phase 1/7: Loading projects config from %s", args.projects)
-    projects = read_projects(Path(args.projects).resolve(), only_default=args.only_default)
-
-    logging.info("Phase 2-6/7: Running summary pipeline (repos, diffs, activity, summaries, artifacts)")
-    return run_summary_pipeline(
+    projects = load_config(Path(args.projects).resolve(), only_default=args.only_default)
+    context = init_pipeline_context(
         projects=projects,
         remote=REMOTE_DEFAULT,
         days=args.days,
@@ -80,6 +87,12 @@ def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient | None) 
         max_prompt_chars=args.max_prompt_chars,
         max_files_in_patch=args.max_files,
     )
+    process_activity_stage(context)
+    sync_repos(context)
+    process_repo_branches(context)
+    build_rollups(context)
+    build_master_summary(context)
+    return render_outputs(context)
 
 
 def main() -> int:
