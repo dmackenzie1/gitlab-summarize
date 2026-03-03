@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Any, Iterable, List, Sequence
 
 NOISY_FILES = {
     "package-lock.json",
@@ -35,8 +35,16 @@ VERSION_SIGNAL_PATHS = [
 ]
 
 
-def sanitize_prompt(text: str) -> str:
-    text = text.replace("\t", "    ")
+def coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def sanitize_prompt(text: str | None) -> str:
+    text = coerce_text(text).replace("\t", "    ")
     return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
 
 
@@ -71,7 +79,8 @@ def path_is_version_signal(path: str) -> bool:
     return False
 
 
-def truncate(text: str, max_chars: int, suffix: str = "\n\n[...truncated...]\n") -> str:
+def truncate(text: str | None, max_chars: int, suffix: str = "\n\n[...truncated...]\n") -> str:
+    text = coerce_text(text)
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + suffix

@@ -17,7 +17,15 @@ class CmdResult:
 
 def run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> CmdResult:
     try:
-        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, check=False)
+        p = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
         return CmdResult(p.returncode == 0, cmd, p.stdout, p.stderr, p.returncode)
     except Exception as exc:
         return CmdResult(False, cmd, "", str(exc), 127)
