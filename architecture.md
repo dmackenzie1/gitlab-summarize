@@ -20,6 +20,12 @@
   - recent merge commit extraction (`recent_merge_commits`, default 10 days)
 - `utils/parsing.py`: text/prompt helpers, chunking, sanitization, stable hashing for cache keys.
 - `utils/email_markup.py`: reusable email-oriented markup rendering.
+- `utils/activity_logs.py`: GitLab Project Activity ingestion pipeline.
+  - discovers `project_activity/*.json`
+  - resolves `project_id` from JSON payload first, then filename fallback
+  - normalizes/filter events into condensed CSV + JSONL artifacts
+  - sanitizes/chunks activity rows for Ollama-safe prompts
+  - writes per-source activity summaries and per-project activity rollups
 
 ## Data flow
 
@@ -37,6 +43,62 @@
    - `weeklySummary.markup`
    - `weeklySummary.email.markup`
    - artifact prompts/summaries under `artifacts/`
+
+## GitLab Project Activity ingestion
+
+### Manual download + placement
+
+1. In GitLab UI, open each project's **Activity** page.
+2. Export/copy JSON from the browser (typically ~100-200 recent events).
+3. Save files under repo-local `project_activity/`.
+
+### Project ID mapping
+
+- Primary mapping: `project_id` found inside the JSON payload/event objects.
+- Fallback mapping: filename pattern if `project_id` is missing.
+  - Preferred filename style: `events-<project_id>.json` (example: `events-1299.json`)
+  - Also accepted: `project-<project_id>*.json` or any filename containing a 3+ digit project id token.
+- `project_id -> project_name` is resolved from `data/projects.json`.
+
+### Normalization, filter window, and outputs
+
+- Events are normalized to a compact schema:
+  - `created_at`, `author`, `action`, `title_or_text`, `url`, `project_id`, `project_name`, `source_file`, `date_status`
+- Time filtering uses the same run window (`--days`, default 10):
+  - dated events outside the window are excluded
+  - unknown-date events are retained and tagged `unknown_date`
+- For each input file, outputs are written under `<out-dir>/artifacts/activity_logs/`:
+  - `<project>.<source>.condensed.csv`
+  - `<project>.<source>.condensed.jsonl`
+  - `<project>.<source>.metadata.json` (input file, totals, kept count, window days, processing timestamp)
+  - `<project>.<source>.activity.summary.md`
+
+### Summarization and resiliency
+
+- LLM input is sanitized prior to Ollama calls:
+  - normalize whitespace
+  - strip control characters
+  - replace non-ASCII bytes and cap very long fields
+- Large feeds are chunked by rows and summarized hierarchically.
+- Ollama failures write timestamped logs to:
+  - `<out-dir>/artifacts/activity_logs/errors/*.log`
+- Failure of one activity file does **not** stop other files/projects.
+
+### Integration with weekly summary
+
+- Per-source activity summaries are combined into per-project rollups:
+  - `<out-dir>/artifacts/activity_logs/<project>.activity.rollup.md`
+- Each repo section in `weeklySummary.markup` gets an **Activity** subsection sourced from that rollup.
+- Top-line activity bullets are also promoted to a global **Activity highlights** section used by both:
+  - `weeklySummary.markup`
+  - `weeklySummary.email.markup`
+
+### Activity schema limitations
+
+- GitLab activity JSON varies by event type (pushes, notes/comments, merge requests, etc.).
+- Some events omit `created_at`; these are kept but sorted after dated events.
+- URL fields are inconsistent across event types; URL may be empty.
+- Text extraction prioritizes `note.body`, then `push_data`, then `target_title`/fallback fields.
 
 ## Merge detection (recent merges)
 
@@ -82,6 +144,8 @@ Given `--out-dir <DIR>`:
 - `<DIR>/artifacts/cache/*.txt`
 
 ## Run locally / CI
+
+`main.py` is the only supported CLI entrypoint.
 
 ### Local run
 

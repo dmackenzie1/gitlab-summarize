@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from utils.email_markup import render_email_markup
+from utils.activity_logs import process_activity_logs
 from utils.git import (
     branch_has_recent_commits,
     diff_name_status,
@@ -114,7 +115,13 @@ def _cache_path(cache_root: Path, key: dict) -> Path:
     return cache_root / f"{stable_json_hash(key)}.txt"
 
 
-def _render_weekly_markup(model: str, days: int, repo_sections: list[str], master_summary: str) -> str:
+def _render_weekly_markup(
+    model: str,
+    days: int,
+    repo_sections: list[str],
+    master_summary: str,
+    activity_highlights: list[tuple[str, str]],
+) -> str:
     stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     header = [
         "# Weekly Engineering Summary",
@@ -124,7 +131,13 @@ def _render_weekly_markup(model: str, days: int, repo_sections: list[str], maste
         "",
     ]
     content = "\n".join(repo_sections)
-    return "\n".join(header + ["## Master Summary", master_summary.strip(), "", content, ""])
+    activity_section = ["## Activity highlights"]
+    if activity_highlights:
+        for project_name, highlight in activity_highlights:
+            activity_section.append(f"- {project_name}: {highlight}")
+    else:
+        activity_section.append("- No project activity logs found in project_activity/.")
+    return "\n".join(header + ["## Master Summary", master_summary.strip(), ""] + activity_section + ["", content, ""])
 
 
 def generate_weekly_summary(
@@ -173,6 +186,14 @@ def generate_weekly_summary(
     repo_sections: list[str] = []
     repo_rollups: list[tuple[str, str]] = []
 
+    activity_result = process_activity_logs(
+        out_dir=out_dir,
+        days=days,
+        include_ollama=include_ollama,
+        ollama_client=ollama_client,
+        max_prompt_chars=max_prompt_chars,
+    )
+
     work_root = Path(tempfile.mkdtemp(prefix="weekly_repo_cache_")) if use_temp else cache_dir
     if not use_temp:
         work_root.mkdir(parents=True, exist_ok=True)
@@ -187,6 +208,11 @@ def generate_weekly_summary(
         repo_art_dir.mkdir(parents=True, exist_ok=True)
 
         lines = [f"## Repo: {repo_display}", ""]
+        activity_rollup = activity_result.rollups_by_project_name.get(repo_display)
+        if not activity_rollup:
+            project_id = item.get("project_id")
+            if isinstance(project_id, int):
+                activity_rollup = activity_result.rollups_by_project_id.get(project_id)
         ok, err = ensure_clone(ssh_url, repo_dir)
         if not ok:
             lines.append(f"- Clone error: {err}")
@@ -306,6 +332,13 @@ def generate_weekly_summary(
             elif rollup_err and not continue_on_error:
                 raise RuntimeError(f"repo rollup failed for {repo_display}: {rollup_err}")
 
+        lines.append("### Activity")
+        if activity_rollup:
+            lines.append(activity_rollup.strip())
+        else:
+            lines.append("- No activity rollup found for this project.")
+        lines.append("")
+
         repo_sections.append("\n".join(lines) + "\n")
 
     master_summary = "No repo summaries available."
@@ -325,6 +358,7 @@ def generate_weekly_summary(
         days,
         repo_sections,
         master_summary,
+        activity_result.highlights_for_master,
     )
     weekly_file = out_dir / "weeklySummary.markup"
     weekly_file.write_text(weekly_markup, encoding="utf-8")
