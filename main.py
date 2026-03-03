@@ -52,7 +52,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", default="repo_cache")
     parser.add_argument("--temp", action="store_true")
 
-    parser.add_argument("--no-ollama", action="store_true", help="Skip LLM summarization and only produce git/activity artifacts")
     parser.add_argument("--ollama-url", default=OLLAMA_URL_DEFAULT)
     parser.add_argument("--ollama-model", default=OLLAMA_MODEL_DEFAULT)
     parser.add_argument("--ollama-timeout", type=int, default=OLLAMA_TIMEOUT_DEFAULT)
@@ -66,10 +65,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_ollama_client(args: argparse.Namespace) -> OllamaClient | None:
-    if args.no_ollama:
-        logging.info("Phase 1/7: Ollama disabled via --no-ollama")
-        return None
+def _build_ollama_client(args: argparse.Namespace) -> OllamaClient:
     logging.info("Phase 1/7: Initializing Ollama client")
     return OllamaClient(
         url=args.ollama_url,
@@ -80,7 +76,7 @@ def _build_ollama_client(args: argparse.Namespace) -> OllamaClient | None:
     )
 
 
-def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient | None) -> PipelineRunResult:
+def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient) -> PipelineRunResult:
     projects = load_config(Path(args.projects).resolve(), only_default=args.only_default)
     context = init_pipeline_context(
         projects=projects,
@@ -89,7 +85,7 @@ def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient | None) 
         out_dir=Path(args.out_dir).resolve(),
         cache_dir=Path(args.cache_dir).resolve(),
         use_temp=args.temp,
-        include_ollama=not args.no_ollama,
+        include_ollama=True,
         ollama_client=ollama_client,
         max_patch_chars=args.max_patch_chars,
         max_prompt_chars=args.max_prompt_chars,
