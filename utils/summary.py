@@ -87,7 +87,7 @@ class PipelineContext:
     prompt_cache_dir: Path
     errors_dir: Path
     project_summaries_dir: Path
-    activity_result: ActivitySummaryResult = field(default_factory=lambda: ActivitySummaryResult({}, {}, []))
+    activity_result: ActivitySummaryResult = field(default_factory=lambda: ActivitySummaryResult({}, []))
     work_root: Path | None = None
     repo_sections: list[str] = field(default_factory=list)
     project_summaries_for_master: list[tuple[str, str]] = field(default_factory=list)
@@ -263,10 +263,6 @@ def sync_repos(context: PipelineContext) -> None:
             lines=[f"## Repo: {repo_display}", ""],
         )
         activity_rollup = context.activity_result.rollups_by_project_name.get(repo_display)
-        if not activity_rollup:
-            project_id = item.get("project_id")
-            if isinstance(project_id, int):
-                activity_rollup = context.activity_result.rollups_by_project_id.get(project_id)
         work_item.activity_rollup = activity_rollup
 
         ok, err = ensure_clone(ssh_url, repo_dir)

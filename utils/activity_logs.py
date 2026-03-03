@@ -18,7 +18,6 @@ ACTIVITY_CHUNK_ROWS = 200
 @dataclass
 class ActivitySummaryResult:
     rollups_by_project_name: dict[str, str]
-    rollups_by_project_id: dict[int, str]
     highlights_for_master: list[tuple[str, str]]
 
 
@@ -286,13 +285,12 @@ def process_activity_logs(
             pass
 
     if not activity_dir.exists() or not activity_dir.is_dir():
-        return ActivitySummaryResult({}, {}, [])
+        return ActivitySummaryResult({}, [])
 
     now = dt.datetime.now(dt.timezone.utc)
     window_start = now - dt.timedelta(days=days)
 
-    project_rollup_inputs: dict[int | str, list[tuple[str, str]]] = {}
-    project_name_lookup: dict[int | str, str] = {}
+    project_rollup_inputs: dict[str, list[tuple[str, str]]] = {}
 
     source_files = sorted(activity_dir.glob("*.json")) + sorted(activity_dir.glob("*.csv"))
     for source_file in source_files:
@@ -318,12 +316,9 @@ def process_activity_logs(
             raw_name = events[0].get("project_name")
             if isinstance(raw_name, str):
                 inferred_project_name = raw_name.strip()
-        project_name = project_name_by_id.get(
-            project_id or -1,
-            inferred_project_name or (f"project_{project_id}" if project_id is not None else "unknown_project"),
-        )
+        project_name = project_name_by_id.get(project_id or -1, inferred_project_name or "unknown_project")
         source_slug = _slug(source_file.stem)
-        project_slug = _slug(project_name if project_name != "unknown_project" else str(project_id or "unknown"))
+        project_slug = _slug(project_name)
 
         normalized_rows: list[dict] = []
         for event in events:
@@ -348,7 +343,7 @@ def process_activity_logs(
                 "action": _event_action(event),
                 "title_or_text": _event_text(event),
                 "url": _event_url(event),
-                "project_id": project_id if project_id is not None else "",
+                "project_id": "",
                 "project_name": project_name,
                 "source_file": source_file.name,
                 "date_status": date_status,
@@ -468,16 +463,12 @@ def process_activity_logs(
 
         summary_path.write_text(summary_text.strip() + "\n", encoding="utf-8")
 
-        project_key: int | str = project_id if project_id is not None else project_slug
-        project_name_lookup[project_key] = project_name
-        project_rollup_inputs.setdefault(project_key, []).append((source_file.name, summary_text.strip()))
+        project_rollup_inputs.setdefault(project_name, []).append((source_file.name, summary_text.strip()))
 
     rollups_by_name: dict[str, str] = {}
-    rollups_by_id: dict[int, str] = {}
     highlights: list[tuple[str, str]] = []
 
-    for project_key, summaries in project_rollup_inputs.items():
-        project_name = project_name_lookup[project_key]
+    for project_name, summaries in project_rollup_inputs.items():
         project_slug = _slug(project_name)
         rollup_path = artifacts_dir / f"{project_slug}.activity.rollup.md"
         lines = [f"# Activity rollup: {project_name}", ""]
@@ -488,8 +479,6 @@ def process_activity_logs(
         rollup_text = "\n".join(lines).strip() + "\n"
         rollup_path.write_text(rollup_text, encoding="utf-8")
         rollups_by_name[project_name] = rollup_text
-        if isinstance(project_key, int):
-            rollups_by_id[project_key] = rollup_text
 
         first_highlight = "No highlights available"
         for line in rollup_text.splitlines():
@@ -499,4 +488,4 @@ def process_activity_logs(
                 break
         highlights.append((project_name, first_highlight))
 
-    return ActivitySummaryResult(rollups_by_name, rollups_by_id, highlights)
+    return ActivitySummaryResult(rollups_by_name, highlights)
