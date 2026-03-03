@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable, List, Sequence
+from collections.abc import Iterable
+from typing import Any
 
 NOISY_FILES = {
     "package-lock.json",
@@ -31,7 +30,6 @@ VERSION_SIGNAL_PATHS = [
     "yarn.lock",
 ]
 
-
 def coerce_text(value: Any) -> str:
     if value is None:
         return ""
@@ -39,15 +37,13 @@ def coerce_text(value: Any) -> str:
         return value.decode("utf-8", errors="replace")
     return str(value)
 
-
 def sanitize_prompt(text: str | None) -> str:
     text = coerce_text(text).replace("\t", "    ")
     return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
 
-
-def unique_preserve_order(items: Iterable[str]) -> List[str]:
+def unique_preserve_order(items: Iterable[str]) -> list[str]:
     seen = set()
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         token = item.strip()
         if not token or token in seen:
@@ -56,7 +52,6 @@ def unique_preserve_order(items: Iterable[str]) -> List[str]:
         out.append(token)
     return out
 
-
 def is_noisy_path(path: str) -> bool:
     normalized = path.replace("\\", "/")
     if normalized.split("/")[-1] in NOISY_FILES:
@@ -64,7 +59,6 @@ def is_noisy_path(path: str) -> bool:
     if normalized.endswith(NOISY_SUFFIXES):
         return True
     return any(fragment in normalized for fragment in NOISY_PATH_CONTAINS)
-
 
 def path_is_version_signal(path: str) -> bool:
     normalized = path.replace("\\", "/").lstrip("./")
@@ -75,15 +69,13 @@ def path_is_version_signal(path: str) -> bool:
             return True
     return False
 
-
 def truncate(text: str | None, max_chars: int, suffix: str = "\n\n[...truncated...]\n") -> str:
     text = coerce_text(text)
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + suffix
 
-
-def chunk_text(text: str, max_chars: int, overlap: int = 1000) -> Sequence[str]:
+def chunk_text(text: str, max_chars: int, overlap: int = 1000) -> list[str]:
     if max_chars <= 0:
         return [text]
     if len(text) <= max_chars:
@@ -98,11 +90,9 @@ def chunk_text(text: str, max_chars: int, overlap: int = 1000) -> Sequence[str]:
         start = max(0, end - overlap)
     return chunks
 
-
 def stable_json_hash(payload: dict) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()

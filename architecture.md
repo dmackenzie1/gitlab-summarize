@@ -29,7 +29,7 @@
 
 ## Data flow
 
-1. Read project repositories from `data/projects.json`.
+1. Read project repositories from `data/projects.json` (default `--projects` value).
 2. Clone/fetch each repository into repo cache (or temporary workspace).
 3. Detect active branches based on `--days` window.
 4. For each branch:
@@ -151,13 +151,13 @@ Given `--out-dir <DIR>`:
 ### Local run
 
 ```bash
-python main.py --projects data/projects.json --days 10 --out-dir out
+python main.py --days 10 --out-dir out
 ```
 
 ### Minimal run
 
 ```bash
-python main.py --projects data/projects.json --out-dir out
+python main.py --out-dir out
 ```
 
 ### CI-friendly example

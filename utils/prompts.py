@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from utils.parsing import sanitize_prompt
 
 BRANCH_SUMMARY_INTRO = (
@@ -33,7 +31,6 @@ ACTIVITY_CHUNK_INTRO = "Summarize GitLab project activity. Focus on high-signal 
 ACTIVITY_ROLLUP_INTRO = "Create a concise project activity summary from chunk summaries."
 ACTIVITY_ROLLUP_RETURN_SPEC = "Return sections: Activity highlights, MRs / merges, Notable discussions/comments, Other activity."
 
-
 def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patch: str, version_signals: list[str]) -> str:
     vs = "\n".join(f"- {entry}" for entry in version_signals[:40]) or "(none detected)"
     return sanitize_prompt(
@@ -45,14 +42,12 @@ def build_branch_prompt(repo: str, branch: str, parent: str, diffstat: str, patc
         f"{BRANCH_SUMMARY_RETURN_SPEC}"
     )
 
-
 def build_repo_rollup_prompt(repo: str, branch_summaries: list[tuple[str, str]]) -> str:
     parts = [*REPO_ROLLUP_INTRO, f"Repo: {repo}", "", "BRANCH SUMMARIES:"]
     for branch, summary in branch_summaries:
         parts.append(f"\n### {branch}\n{summary.strip()}\n")
     parts.append(REPO_ROLLUP_RETURN_SPEC)
     return sanitize_prompt("\n".join(parts))
-
 
 def build_activity_chunk_prompt(project_name: str, source_name: str, chunk_number: int, rows: list[dict]) -> str:
     body = [
@@ -68,7 +63,6 @@ def build_activity_chunk_prompt(project_name: str, source_name: str, chunk_numbe
             f"{event['title_or_text']} | {event['url']}"
         )
     return "\n".join(body)
-
 
 def build_activity_rollup_prompt(project_name: str, source_name: str, chunk_summaries: list[str]) -> str:
     prompt = [

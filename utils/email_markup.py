@@ -1,12 +1,8 @@
-from __future__ import annotations
-
 import html
 from typing import Iterable
 
-
 def _to_lines(items: Iterable[str]) -> str:
     return "".join(f"<li>{html.escape(item)}</li>" for item in items if item.strip())
-
 
 def render_email_markup(markup: str, title: str = "Weekly Summary") -> str:
     lines = [line.rstrip() for line in markup.splitlines()]

@@ -1,21 +1,16 @@
-from __future__ import annotations
-
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
-
 
 @dataclass
 class CmdResult:
     ok: bool
-    cmd: List[str]
+    cmd: list[str]
     stdout: str
     stderr: str
     returncode: int
 
-
-def run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> CmdResult:
+def run_cmd(cmd: list[str], cwd: Path | None = None) -> CmdResult:
     try:
         p = subprocess.run(
             cmd,
@@ -30,10 +25,8 @@ def run_cmd(cmd: List[str], cwd: Optional[Path] = None) -> CmdResult:
     except Exception as exc:
         return CmdResult(False, cmd, "", str(exc), 127)
 
-
 def git(repo_dir: Path, *args: str) -> CmdResult:
     return run_cmd(["git", "-C", str(repo_dir), *args])
-
 
 def repo_dir_name_from_project(project_name: str, ssh_url: str) -> str:
     pn = (project_name or "").strip()
@@ -44,8 +37,7 @@ def repo_dir_name_from_project(project_name: str, ssh_url: str) -> str:
         base = base[:-4]
     return base or pn or "repo"
 
-
-def ensure_clone(repo_url: str, target_dir: Path) -> Tuple[bool, Optional[str]]:
+def ensure_clone(repo_url: str, target_dir: Path) -> tuple[bool, str | None]:
     if (target_dir / ".git").exists():
         return True, None
     target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -54,12 +46,10 @@ def ensure_clone(repo_url: str, target_dir: Path) -> Tuple[bool, Optional[str]]:
         return True, None
     return False, res.stderr.strip() or f"git clone failed (exit {res.returncode})"
 
-
 def fetch_all(repo_dir: Path) -> CmdResult:
     return git(repo_dir, "fetch", "--all", "--prune")
 
-
-def get_default_remote_branch(repo_dir: Path, remote: str) -> Optional[str]:
+def get_default_remote_branch(repo_dir: Path, remote: str) -> str | None:
     res = git(repo_dir, "symbolic-ref", "-q", f"refs/remotes/{remote}/HEAD")
     if not res.ok:
         return None
@@ -68,8 +58,7 @@ def get_default_remote_branch(repo_dir: Path, remote: str) -> Optional[str]:
         return ref.replace("refs/remotes/", "")
     return None
 
-
-def list_remote_branches(repo_dir: Path, remote: str) -> Tuple[Optional[List[str]], Optional[str]]:
+def list_remote_branches(repo_dir: Path, remote: str) -> tuple[list[str] | None, str | None]:
     res = git(repo_dir, "for-each-ref", "--format=%(refname:short)", f"refs/remotes/{remote}")
     if not res.ok:
         return None, res.stderr.strip() or f"git for-each-ref failed (exit {res.returncode})"
@@ -81,7 +70,6 @@ def list_remote_branches(repo_dir: Path, remote: str) -> Tuple[Optional[List[str
         out.append(line)
     return sorted(out), None
 
-
 def branch_has_recent_commits(repo_dir: Path, branch: str, since: str) -> bool:
     res = git(repo_dir, "rev-list", "--count", f"--since={since}", branch)
     if not res.ok:
@@ -91,30 +79,25 @@ def branch_has_recent_commits(repo_dir: Path, branch: str, since: str) -> bool:
     except ValueError:
         return False
 
-
-def merge_base(repo_dir: Path, a: str, b: str) -> Optional[str]:
+def merge_base(repo_dir: Path, a: str, b: str) -> str | None:
     res = git(repo_dir, "merge-base", a, b)
     return res.stdout.strip() if res.ok and res.stdout.strip() else None
 
-
-def rev_parse(repo_dir: Path, ref: str) -> Optional[str]:
+def rev_parse(repo_dir: Path, ref: str) -> str | None:
     res = git(repo_dir, "rev-parse", ref)
     return res.stdout.strip() if res.ok and res.stdout.strip() else None
-
 
 def diff_stat(repo_dir: Path, base: str, head: str) -> str:
     res = git(repo_dir, "diff", "--stat", f"{base}..{head}")
     return res.stdout.strip() if res.ok else ""
 
-
-def diff_name_status(repo_dir: Path, base: str, head: str) -> List[str]:
+def diff_name_status(repo_dir: Path, base: str, head: str) -> list[str]:
     res = git(repo_dir, "diff", "--name-status", f"{base}..{head}")
     if not res.ok:
         return []
     return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
-
-def diff_numstat(repo_dir: Path, base: str, head: str) -> List[Tuple[str, int, int]]:
+def diff_numstat(repo_dir: Path, base: str, head: str) -> list[tuple[str, int, int]]:
     res = git(repo_dir, "diff", "--numstat", f"{base}..{head}")
     if not res.ok:
         return []
@@ -129,15 +112,13 @@ def diff_numstat(repo_dir: Path, base: str, head: str) -> List[Tuple[str, int, i
             pass
     return sorted(out, key=lambda item: item[1] + item[2], reverse=True)
 
-
-def diff_patch(repo_dir: Path, base: str, head: str, paths: List[str]) -> str:
+def diff_patch(repo_dir: Path, base: str, head: str, paths: list[str]) -> str:
     if not paths:
         return ""
     res = git(repo_dir, "diff", f"{base}..{head}", "--patch", "--no-color", "--minimal", "--", *paths)
     return res.stdout if res.ok else ""
 
-
-def recent_merge_commits(repo_dir: Path, days: int = 10, limit: int = 40) -> List[dict]:
+def recent_merge_commits(repo_dir: Path, days: int = 10, limit: int = 40) -> list[dict]:
     fmt = "%H%x1f%an%x1f%ad%x1f%s"
     res = git(
         repo_dir,

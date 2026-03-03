@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-"""
-analyze_libraries.py (improved)
-
-Scans a repo cache directory for dependency manifests and produces:
-1) library_usage.csv         (ground-truth row-per-occurrence)
-2) library_matrix.csv        (rows=library, cols=repo/app, cell=version/spec)
-3) library_mismatches.csv    (common libs with version/spec mismatch across repos)
-
-Key improvements:
-- Extracts "true" runtime/tool names + versions from Docker images, apk/apt installs, etc.
-- Groups Docker image refs into a consistent family key:
-    runtime:node, runtime:nginx, runtime:postgres, runtime:redis, runtime:<image-name>
-  so mismatches show up as a single row.
-- Captures Node runtime constraints from:
-    package.json -> engines.node
-    .nvmrc, .node-version
-- apk/apt installs extract package name + version constraint when present:
-    apk add ffmpeg~=8.0.1  => apk:ffmpeg with spec ~=8.0.1
-    apt-get install foo=1.2 => apt:foo with spec =1.2
-
-Usage:
-  python analyze_libraries.py
-  python analyze_libraries.py --repo-cache ./repo_cache
-  python analyze_libraries.py --min-repos 3 --only-mismatches
-"""
-
-from __future__ import annotations
 
 import argparse
 import csv
@@ -39,16 +12,11 @@ from typing import Dict, Iterable, List, Tuple, Optional, Set
 
 import toml
 
-# Optional parsers (enable if installed)
 try:
     import yaml  # for docker-compose
 except Exception:
     yaml = None
 
-
-# ----------------------------
-# Config
-# ----------------------------
 
 MANIFEST_FILENAMES = {
     # Python
@@ -95,10 +63,6 @@ PY_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*")
 REQ_LINE_CONTINUATION_RE = re.compile(r"\\\s*$")
 
 
-# ----------------------------
-# Types
-# ----------------------------
-
 @dataclass(frozen=True)
 class Usage:
     repo: str
@@ -107,15 +71,7 @@ class Usage:
     version_or_spec: str
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
-
 def normalize_name(name: str) -> str:
-    """
-    Normalizes names for grouping (npm scopes preserved if present via raw name).
-    We normalize separators to '-' and lowercase.
-    """
     return re.sub(r"[-_.]+", "-", (name or "")).lower().strip()
 
 
@@ -129,33 +85,12 @@ def iter_text_lines(path: Path) -> Iterable[str]:
 
 
 def stable_spec(spec: str) -> str:
-    """
-    Normalize a spec for comparison (mismatch detection).
-    We keep it mostly intact, just trim whitespace.
-    """
     return (spec or "").strip()
 
-
-# ----------------------------
-# Canonicalization: Docker images, apk, apt
-# ----------------------------
 
 _IMAGE_DIGEST_SPLIT_RE = re.compile(r"@sha256:[0-9a-f]{16,}$", re.IGNORECASE)
 
 def parse_docker_image_ref(image: str) -> Tuple[str, str]:
-    """
-    Parse an image reference and return (image_name, tag_or_digestless_ref).
-
-    Examples:
-      node:22-alpine                      -> ("node", "22-alpine")
-      registry/x/y/node:24.13.1-alpine3.23-> ("node", "24.13.1-alpine3.23")
-      nginx:1.29.4-alpine@sha256:...      -> ("nginx", "1.29.4-alpine")
-
-    Notes:
-    - We strip a sha256 digest suffix.
-    - We extract the last path component as the image name.
-    - Tag parsing is best-effort and works for common refs.
-    """
     s = (image or "").strip()
     if not s:
         return ("", "")
@@ -175,9 +110,6 @@ def parse_docker_image_ref(image: str) -> Tuple[str, str]:
 
 
 def runtime_key_from_image(image: str) -> Tuple[str, str]:
-    """
-    Convert a docker image ref into a canonical "runtime:<name>" library key and a version/tag.
-    """
     name, tag = parse_docker_image_ref(image)
     if not name:
         return ("", "")
@@ -186,13 +118,6 @@ def runtime_key_from_image(image: str) -> Tuple[str, str]:
 
 _APK_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]*")
 def parse_apk_pkg_token(token: str) -> Tuple[str, str]:
-    """
-    token examples:
-      ffmpeg~=8.0.1
-      gcompat=1.1.0-r4
-      curl
-    returns ("ffmpeg", "~=8.0.1") or ("gcompat", "=1.1.0-r4") or ("curl", "")
-    """
     t = (token or "").strip()
     if not t:
         return ("", "")
@@ -213,12 +138,6 @@ def parse_apk_pkg_token(token: str) -> Tuple[str, str]:
 
 
 def parse_apt_pkg_token(token: str) -> Tuple[str, str]:
-    """
-    token examples:
-      foo=1.2.3-1ubuntu
-      foo
-    returns ("foo", "=1.2.3-1ubuntu") or ("foo","")
-    """
     t = (token or "").strip()
     if not t:
         return ("", "")
@@ -230,27 +149,16 @@ def parse_apt_pkg_token(token: str) -> Tuple[str, str]:
 
 
 def add_lib(out: Dict[str, str], raw_name: str, raw_spec: str):
-    """
-    Add a library occurrence to the map.
-    Keys in `out` are already normalized by callers or by this function.
-    """
     if not raw_name:
         return
     out[normalize_name(raw_name)] = stable_spec(raw_spec)
 
 
 def add_lib_keep_key(out: Dict[str, str], key: str, spec: str):
-    """
-    Add a library occurrence where `key` is already canonical (e.g. runtime:node).
-    """
     if not key:
         return
     out[key] = stable_spec(spec)
 
-
-# ----------------------------
-# Parsers: Python
-# ----------------------------
 
 def parse_python_req_name(spec: str) -> str:
     s = (spec or "").strip()
@@ -377,10 +285,6 @@ def extract_pipfile(pipfile_path: Path) -> Dict[str, str]:
     return libs
 
 
-# ----------------------------
-# Parsers: Node
-# ----------------------------
-
 def extract_package_json(pkg_path: Path) -> Dict[str, str]:
     libs: Dict[str, str] = {}
     try:
@@ -405,10 +309,6 @@ def extract_package_json(pkg_path: Path) -> Dict[str, str]:
 
 
 def extract_package_lock(lock_path: Path) -> Dict[str, str]:
-    """
-    package-lock.json includes the full resolved tree. We only extract top-level
-    "dependencies" versions when present.
-    """
     libs: Dict[str, str] = {}
     try:
         data = json.loads(safe_read_text(lock_path))
@@ -426,9 +326,6 @@ def extract_package_lock(lock_path: Path) -> Dict[str, str]:
 
 
 def extract_node_version_file(path: Path) -> Dict[str, str]:
-    """
-    .nvmrc or .node-version: usually contains just the version, sometimes with a leading 'v'
-    """
     libs: Dict[str, str] = {}
     raw = safe_read_text(path).strip()
     if not raw:
@@ -440,16 +337,7 @@ def extract_node_version_file(path: Path) -> Dict[str, str]:
     return libs
 
 
-# ----------------------------
-# Parsers: uv
-# ----------------------------
-
 def extract_uv_lock(uv_lock_path: Path) -> Dict[str, str]:
-    """
-    Best-effort scan for:
-      name = "foo"
-      version = "1.2.3"
-    """
     libs: Dict[str, str] = {}
     text = safe_read_text(uv_lock_path)
 
@@ -466,10 +354,6 @@ def extract_uv_lock(uv_lock_path: Path) -> Dict[str, str]:
             name = None
     return libs
 
-
-# ----------------------------
-# Docker scanning (heuristics)
-# ----------------------------
 
 _APT_INSTALL_RE = re.compile(r"(?i)\bapt-get\s+install\b([^&;]+)")
 _APK_ADD_RE = re.compile(r"(?i)\bapk\s+add\b([^&;]+)")
@@ -569,10 +453,6 @@ def extract_compose_signals(compose_path: Path) -> Dict[str, str]:
     return libs
 
 
-# ----------------------------
-# Repo walk & aggregation
-# ----------------------------
-
 def find_manifests(repo_root: Path) -> List[Path]:
     manifests: List[Path] = []
     for root, dirs, files in os.walk(repo_root):
@@ -621,11 +501,6 @@ def parse_manifest(path: Path) -> Tuple[str, Dict[str, str]]:
 
 
 def scan_repo_cache(repo_cache_path: Path) -> Tuple[Dict[str, List[Usage]], List[str]]:
-    """
-    Returns:
-      - library_usage: lib -> list[Usage]
-      - repos: sorted list of repo/app names discovered
-    """
     library_usage: Dict[str, List[Usage]] = defaultdict(list)
     repos: List[str] = []
 
@@ -656,10 +531,6 @@ def scan_repo_cache(repo_cache_path: Path) -> Tuple[Dict[str, List[Usage]], List
     return library_usage, repos
 
 
-# ----------------------------
-# Outputs
-# ----------------------------
-
 def write_usage_csv(library_usage: Dict[str, List[Usage]], output_csv_path: Path) -> None:
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -688,11 +559,6 @@ def build_matrix(
     min_repos: int = 1,
     only_mismatches: bool = False,
 ) -> Tuple[List[str], List[Dict[str, str]]]:
-    """
-    Returns (header, rows) where:
-      header = ["Library"] + repos
-      rows = list of dicts { "Library": lib, repo1: spec, repo2: spec, ... }
-    """
     # lib -> repo -> spec (if multiple, join with " | " deterministically)
     lib_repo_specs: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
 
@@ -746,13 +612,6 @@ def build_mismatch_report(
     *,
     min_repos: int = 2,
 ) -> List[Dict[str, str]]:
-    """
-    Produces a compact report per library:
-      - repo_count
-      - distinct_specs_count
-      - distinct_specs (joined)
-      - repos (joined)
-    """
     lib_repo_specs: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
 
     for lib, usages in library_usage.items():
@@ -796,10 +655,6 @@ def write_mismatch_csv(rows: List[Dict[str, str]], out_path: Path) -> None:
         for r in rows:
             w.writerow(r)
 
-
-# ----------------------------
-# Main
-# ----------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Analyze dependency versions across repos and emit a matrix + mismatch report.")

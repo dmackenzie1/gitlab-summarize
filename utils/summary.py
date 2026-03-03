@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import datetime as dt
 import json
 import logging
@@ -8,7 +6,6 @@ import tempfile
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from utils.activity_logs import process_activity_logs
 from utils.git import (
@@ -47,7 +44,6 @@ _VERSION_PATTERNS = [
     re.compile(r"\bkaniko\b[^\n]*\b(v?\d+\.\d+\.\d+)\b", re.IGNORECASE),
 ]
 
-
 @dataclass
 class PipelineRunResult:
     exit_code: int
@@ -55,7 +51,6 @@ class PipelineRunResult:
     branches_analyzed: int
     artifacts_root: Path
     errors: list[str]
-
 
 @dataclass
 class RepoWorkItem:
@@ -72,7 +67,6 @@ class RepoWorkItem:
     branch_change_stats: list[tuple[str, int, int, int]] = field(default_factory=list)
     merge_count: int = 0
 
-
 @dataclass
 class PipelineContext:
     projects: list[dict]
@@ -82,7 +76,7 @@ class PipelineContext:
     cache_dir: Path
     use_temp: bool
     include_ollama: bool
-    ollama_client: Optional[OllamaClient]
+    ollama_client: OllamaClient | None
     max_patch_chars: int
     max_prompt_chars: int
     max_files_in_patch: int
@@ -93,18 +87,14 @@ class PipelineContext:
     project_summaries_dir: Path
     activity_result: ActivitySummaryResult = field(default_factory=lambda: ActivitySummaryResult({}, []))
     work_root: Path | None = None
-    repo_sections: list[str] = field(default_factory=list)
     project_summaries_for_master: list[tuple[str, str]] = field(default_factory=list)
     repo_items: list[RepoWorkItem] = field(default_factory=list)
     branches_analyzed: int = 0
     errors: list[str] = field(default_factory=list)
-    master_summary: str = "No repo summaries available."
     started_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
-
 
 def _emit(stage: str, message: str) -> None:
     print(f"[{stage}] {message}", flush=True)
-
 
 def read_projects(path: Path, only_default: bool) -> list[dict]:
     if not path.exists():
@@ -122,7 +112,6 @@ def read_projects(path: Path, only_default: bool) -> list[dict]:
             items.append(entry)
     return items
 
-
 def load_config(path: Path, only_default: bool) -> list[dict]:
     if path.exists():
         _emit("CONFIG", f"loading repositories from {path}")
@@ -130,7 +119,6 @@ def load_config(path: Path, only_default: bool) -> list[dict]:
     fallback = Path("data/projects.json").resolve()
     _emit("CONFIG", f"{path} missing; falling back to {fallback}")
     return read_projects(fallback, only_default=only_default)
-
 
 def init_pipeline_context(
     *,
@@ -141,7 +129,7 @@ def init_pipeline_context(
     cache_dir: Path,
     use_temp: bool,
     include_ollama: bool,
-    ollama_client: Optional[OllamaClient],
+    ollama_client: OllamaClient | None,
     max_patch_chars: int,
     max_prompt_chars: int,
     max_files_in_patch: int,
@@ -175,7 +163,6 @@ def init_pipeline_context(
         project_summaries_dir=project_summaries_dir,
     )
 
-
 def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[str]) -> list[str]:
     from utils.git import git
 
@@ -194,17 +181,12 @@ def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[st
                 signals.append(f"{path}: {text[:240]}")
     return unique_preserve_order(signals)
 
-
-
 def _cache_path(cache_root: Path, key: dict) -> Path:
     return cache_root / f"{stable_json_hash(key)}.txt"
-
 
 def _persist_project_summary(context: PipelineContext, repo_key: str, lines: list[str]) -> None:
     text = "\n".join(lines).rstrip() + "\n"
     (context.project_summaries_dir / f"{repo_key}.summary.markup").write_text(text, encoding="utf-8")
-    context.repo_sections.append(text)
-
 
 def _clean_wrapped_hyphenation(text: str) -> str:
     if not text:
@@ -212,7 +194,6 @@ def _clean_wrapped_hyphenation(text: str) -> str:
     text = text.replace("\u00ad", "")
     text = re.sub(r"(?<=\w)-\s+(?=\w)", "", text)
     return re.sub(r"\s+", " ", text).strip()
-
 
 _SPECULATIVE_PHRASES = [
     "may",
@@ -223,7 +204,6 @@ _SPECULATIVE_PHRASES = [
     "requires verification",
 ]
 
-
 def _strip_noise(text: str) -> str:
     cleaned = _clean_wrapped_hyphenation(text)
     cleaned = re.sub(r"\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z?\b", "", cleaned, flags=re.IGNORECASE)
@@ -232,13 +212,11 @@ def _strip_noise(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned.rstrip(";")
 
-
 def _is_major_version_bump(text: str) -> bool:
     match = re.search(r"(\d+)\.\d+(?:\.\d+)?\s*(?:->|→|to)\s*(\d+)\.\d+(?:\.\d+)?", text)
     if not match:
         return False
     return int(match.group(1)) != int(match.group(2))
-
 
 def _is_speculative_without_evidence(text: str) -> bool:
     lowered = text.lower()
@@ -247,12 +225,10 @@ def _is_speculative_without_evidence(text: str) -> bool:
     evidence_tokens = ["failed", "failure", "error", "breaking", "action required"]
     return not (_is_major_version_bump(text) or any(token in lowered for token in evidence_tokens))
 
-
 def _clean_bullet(text: str) -> str:
     cleaned = _strip_noise(text)
     cleaned = re.sub(r"\s*;+\s*$", "", cleaned)
     return cleaned
-
 
 def _extract_bullets(text: str) -> list[str]:
     bullets: list[str] = []
@@ -271,12 +247,10 @@ def _extract_bullets(text: str) -> list[str]:
             bullets.append(candidate)
     return bullets
 
-
 def _normalized_text(text: str) -> str:
     cleaned = _clean_wrapped_hyphenation(text).lower()
     cleaned = re.sub(r"[^a-z0-9\s]", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
-
 
 def _dedupe_bullets(bullets: list[str]) -> list[str]:
     unique: list[str] = []
@@ -293,7 +267,6 @@ def _dedupe_bullets(bullets: list[str]) -> list[str]:
         normalized.append(key)
     return unique
 
-
 def _score_bullet(text: str) -> int:
     score = 1
     lowered = text.lower()
@@ -308,11 +281,9 @@ def _score_bullet(text: str) -> int:
         score += 1
     return score
 
-
 def _top_bullets(bullets: list[str], limit: int) -> list[str]:
     ranked = sorted(bullets, key=lambda item: (_score_bullet(item), len(item)), reverse=True)
     return ranked[:limit]
-
 
 def _normalize_for_cross_project(text: str) -> str:
     normalized = _normalized_text(text)
@@ -320,7 +291,6 @@ def _normalize_for_cross_project(text: str) -> str:
     normalized = re.sub(r"\b(repo|project|projects|pipeline|branch|merge|commit)s?\b", "", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
-
 
 def _build_project_bullets(context: PipelineContext) -> dict[str, list[str]]:
     project_bullets: dict[str, list[str]] = {}
@@ -332,7 +302,6 @@ def _build_project_bullets(context: PipelineContext) -> dict[str, list[str]]:
             combined.extend(_extract_bullets(repo_item.activity_rollup))
         project_bullets[repo_item.repo_display] = _dedupe_bullets(combined)
     return project_bullets
-
 
 def _build_cross_project_updates(project_bullets: dict[str, list[str]]) -> tuple[list[str], set[str]]:
     bucket: dict[str, list[tuple[str, str]]] = {}
@@ -358,12 +327,10 @@ def _build_cross_project_updates(project_bullets: dict[str, list[str]]) -> tuple
         lines.append(f"{sample} (repos: {repo_text})")
     return lines[:8], used_keys
 
-
 def _is_version_or_library_update(text: str) -> bool:
     lowered = text.lower()
     markers = ["version", "upgrade", "bump", "dependency", "dependencies", "node", "python", "npm", "library"]
     return any(marker in lowered for marker in markers) or bool(re.search(r"\bv?\d+\.\d+(\.\d+)?\b", lowered))
-
 
 def _build_overall_highlights(context: PipelineContext, cross_project_updates: list[str], project_bullets: dict[str, list[str]]) -> list[str]:
     highlights: list[str] = []
@@ -389,7 +356,6 @@ def _build_overall_highlights(context: PipelineContext, cross_project_updates: l
     fallback = "Engineering delivery focused on meaningful runtime, API, and deployment changes this week."
     return (highlights[:6] or [fallback])[:6]
 
-
 def _management_summary_from_bullets(bullets: list[str]) -> str:
     if not bullets:
         return "No material engineering changes were captured for this project."
@@ -398,12 +364,10 @@ def _management_summary_from_bullets(bullets: list[str]) -> str:
         return _clean_bullet(top[0]).rstrip(".") + "."
     return _sentence_from_bullets([_clean_bullet(top[0]), _clean_bullet(top[1])], 2)
 
-
 def _important_unique_bullets(bullets: list[str], limit: int) -> list[str]:
     ranked = _top_bullets(_dedupe_bullets(bullets), max(limit * 2, limit))
     important = [b for b in ranked if _score_bullet(b) >= 3]
     return (important or ranked)[:limit]
-
 
 def _action_needed(bullets: list[str], status: str) -> list[str]:
     needs_action = [
@@ -414,7 +378,6 @@ def _action_needed(bullets: list[str], status: str) -> list[str]:
         needs_action = [b for b in needs_action if "verify pipeline" not in b.lower()]
     return _top_bullets(_dedupe_bullets(needs_action), 3)
 
-
 def _sentence_from_bullets(bullets: list[str], limit: int) -> str:
     selected = bullets[:limit]
     if not selected:
@@ -422,31 +385,7 @@ def _sentence_from_bullets(bullets: list[str], limit: int) -> str:
     text = "; ".join(selected)
     return text[0].upper() + text[1:] + ("." if not text.endswith(".") else "")
 
-
-def _build_management_bullets(context: PipelineContext) -> list[str]:
-    pool: list[str] = []
-    for repo_item in context.repo_items:
-        for _, summary in repo_item.branch_rollups:
-            pool.extend(_extract_bullets(summary))
-    for _, highlight in context.activity_result.highlights_for_master:
-        pool.extend(_extract_bullets(highlight))
-    return _top_bullets(_dedupe_bullets(pool), 6)
-
-
-def _build_cross_cutting_notes(context: PipelineContext) -> list[str]:
-    tags: dict[str, str] = {
-        "node": "Runtime baseline changes (Node) appear across multiple projects; validate runner/runtime compatibility.",
-        "template": "Shared CI/template changes landed in multiple repos; check inherited pipeline behavior.",
-        "migration": "Migration-oriented changes are present across projects; sequence rollout and validation carefully.",
-    }
-    all_text = " ".join(
-        " ".join(_extract_bullets(summary)) for item in context.repo_items for _, summary in item.branch_rollups
-    ).lower()
-    notes = [message for key, message in tags.items() if key in all_text]
-    return notes[:3]
-
-
-def _render_weekly_email_html(context: PipelineContext, model: str, days: int) -> str:
+def _render_weekly_email_html(context: PipelineContext, days: int) -> str:
     generated = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     duration = dt.datetime.now(dt.timezone.utc) - context.started_at
     duration_min = max(1, int(duration.total_seconds() // 60))
@@ -507,7 +446,6 @@ def _render_weekly_email_html(context: PipelineContext, model: str, days: int) -
     parts.append("</body></html>\n")
     return "\n".join(parts)
 
-
 def process_activity_stage(context: PipelineContext) -> None:
     _emit("ACTIVITY", "processing project_activity inputs")
     context.activity_result = process_activity_logs(
@@ -518,7 +456,6 @@ def process_activity_stage(context: PipelineContext) -> None:
         max_prompt_chars=context.max_prompt_chars,
         log_item=lambda msg: _emit("ACTIVITY", msg),
     )
-
 
 def sync_repos(context: PipelineContext) -> None:
     context.work_root = Path(tempfile.mkdtemp(prefix="weekly_repo_cache_")) if context.use_temp else context.cache_dir
@@ -577,9 +514,6 @@ def sync_repos(context: PipelineContext) -> None:
             for m in merges[:8]:
                 work_item.lines.append(f"  - {m['date']} {m['subject']} ({m['author']})")
         context.repo_items.append(work_item)
-
-
-
 
 def _call_or_cache(context: PipelineContext, prompt: str, scope: dict, force_refresh: bool = False) -> tuple[str | None, str | None]:
     if not context.include_ollama or context.ollama_client is None:
@@ -751,7 +685,6 @@ def process_repo_branches(context: PipelineContext) -> None:
                 repo_item.lines.append(f"### {branch}")
                 repo_item.lines.append("- Summary unavailable (see artifacts/errors logs).")
 
-
 def build_rollups(context: PipelineContext) -> None:
     for repo_item in context.repo_items:
         if repo_item.branch_rollups and context.include_ollama:
@@ -777,7 +710,6 @@ def build_rollups(context: PipelineContext) -> None:
         repo_item.lines.append("")
         _persist_project_summary(context, repo_item.repo_key, repo_item.lines)
 
-
 def build_master_summary(context: PipelineContext) -> None:
     if not context.project_summaries_for_master or not context.include_ollama or context.ollama_client is None:
         return
@@ -795,19 +727,16 @@ def build_master_summary(context: PipelineContext) -> None:
     }
     cpath = _cache_path(context.prompt_cache_dir, key)
     if cpath.exists() and not context.force_resummarize:
-        context.master_summary = cpath.read_text(encoding="utf-8").strip()
-        (context.artifacts_root / "master_summary.summary.txt").write_text(context.master_summary + "\n", encoding="utf-8")
+        summary_text = cpath.read_text(encoding="utf-8").strip()
+        (context.artifacts_root / "master_summary.summary.txt").write_text(summary_text + "\n", encoding="utf-8")
         return
     result = context.ollama_client.generate(master_prompt)
     if result.error:
         (context.artifacts_root / "master_summary.summary.txt").write_text(f"ERROR: {result.error.message}\n", encoding="utf-8")
         return
-    context.master_summary = (result.text or "").strip()
-    cpath.write_text(context.master_summary + "\n", encoding="utf-8")
-    (context.artifacts_root / "master_summary.summary.txt").write_text(context.master_summary + "\n", encoding="utf-8")
-
-
-
+    summary_text = (result.text or "").strip()
+    cpath.write_text(summary_text + "\n", encoding="utf-8")
+    (context.artifacts_root / "master_summary.summary.txt").write_text(summary_text + "\n", encoding="utf-8")
 
 def _render_weekly_markup(
     context: PipelineContext,
@@ -859,7 +788,6 @@ def _render_weekly_markup(
     lines.append("")
     return "\n".join(lines)
 
-
 def render_outputs(context: PipelineContext) -> PipelineRunResult:
     _emit("RENDER", "writing weeklySummary.markup")
     weekly_markup = _render_weekly_markup(
@@ -872,7 +800,6 @@ def render_outputs(context: PipelineContext) -> PipelineRunResult:
     _emit("RENDER", "writing weeklySummary.email.markup")
     weekly_email = _render_weekly_email_html(
         context,
-        context.ollama_client.model if context.ollama_client else "disabled",
         context.days,
     )
     (context.out_dir / "weeklySummary.email.markup").write_text(weekly_email, encoding="utf-8")
