@@ -1,32 +1,26 @@
-# GroupStats
+# gitlab-summarize
 
-## Setup
+Diff-grounded weekly summarization tooling.
 
-1. Install dependencies:
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+## Quick start
 
-2. Set up environment variables (optional, for GitLab API access):
-   ```bash
-   echo "GITLAB_TOKEN=your_token_here" > .env
-   ```
+```bash
+python main.py --monitored data/monitored.json --days 10 --out-dir out
+```
 
-3. Run the tool:
-   ```bash
-   python generate_summary.py --group emss --days 7 --out ./out
-   ```
+## Outputs
 
-## Testing
+- `out/weeklySummary.markup`
+- `out/weeklySummary.email.markup`
+- `out/artifacts/` (per-repo prompts, patches, summaries, cache, and error logs)
 
-1. Run the GitLab API test script:
-   ```bash
-   python scripts/test_gitlab_api.py
-   ```
+## Useful flags
 
-## Output
+- `--no-ollama` (generate git artifacts only)
+- `--ollama-model <model>`
+- `--ollama-timeout <seconds>`
+- `--ollama-retries <n>`
+- `--ollama-keep-alive 20m`
+- `--fail-fast` (stop on unrecoverable summary errors)
 
-- The tool generates `./out/weekly_summary.md`.
-- The test script generates `./out/gitlab_api_test.md`.
+See `architecture.md` for module responsibilities and data flow.
