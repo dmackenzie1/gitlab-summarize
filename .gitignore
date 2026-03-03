@@ -9,3 +9,4 @@ __pycache__/
 repo_cache
 artifacts
 
+/project_activity
