@@ -24,3 +24,5 @@ python main.py --monitored data/monitored.json --days 10 --out-dir out
 - `--fail-fast` (stop on unrecoverable summary errors)
 
 See `architecture.md` for module responsibilities and data flow.
+
+`main.py` is the single supported entrypoint for summary generation.
