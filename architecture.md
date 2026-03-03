@@ -168,7 +168,7 @@ python main.py \
   --days 10 \
   --out-dir out \
   --ollama-url http://ollama:11434/api/generate \
-  --ollama-model qwen2.5-coder:32b \
+  --ollama-model qwen3.5:9b \
   --ollama-timeout 300 \
   --ollama-retries 4
 ```
