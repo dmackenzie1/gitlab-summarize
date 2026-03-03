@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
-
 
 @dataclass
 class OllamaError:
@@ -9,12 +6,10 @@ class OllamaError:
     status_code: int | None = None
     details: str | None = None
 
-
 @dataclass
 class OllamaResult:
     text: str | None
     error: OllamaError | None
-
 
 @dataclass
 class ActivitySummaryResult:

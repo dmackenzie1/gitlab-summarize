@@ -1,9 +1,8 @@
 import unittest
 from pathlib import Path
 
-from utils.activity_logs import ActivitySummaryResult
+from utils.models import ActivitySummaryResult
 from utils.summary import PipelineContext, RepoWorkItem, _clean_wrapped_hyphenation, _render_weekly_email_html
-
 
 class WeeklyEmailFormatTests(unittest.TestCase):
     def test_hyphenation_cleanup(self):
@@ -46,7 +45,7 @@ class WeeklyEmailFormatTests(unittest.TestCase):
         context.repo_items = [item]
         context.branches_analyzed = 3
 
-        html = _render_weekly_email_html(context, model="qwen", days=10)
+        html = _render_weekly_email_html(context, days=10)
 
         self.assertEqual(html.count("Weekly Engineering Summary"), 1)
         self.assertIn("Management Summary", html)
@@ -54,7 +53,6 @@ class WeeklyEmailFormatTests(unittest.TestCase):
         self.assertIn("Key Changes", html)
         self.assertNotIn("da- tabase", html)
         self.assertNotIn("### Activity", html)
-
 
 if __name__ == "__main__":
     unittest.main()

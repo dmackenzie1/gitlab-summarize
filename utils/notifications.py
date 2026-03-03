@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import datetime as dt
 import logging
 import smtplib
@@ -9,17 +7,14 @@ import html
 import os
 from pathlib import Path
 
-
 def _csv_env(name: str, default: str) -> str:
     raw = os.getenv(name, default)
     return ", ".join([item.strip() for item in raw.split(",") if item.strip()])
-
 
 SMTP_HOST = os.getenv("SMTP_HOST", "ndc-relay.ndc.nasa.gov")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "25"))
 EMAIL_FROM = os.getenv("EMAIL_FROM", "emss-no-reply@mail.nasa.gov")
 EMAIL_TO = _csv_env("SMTP_TO", "david.l.mackenzie@nasa.gov")
-
 
 @dataclass
 class PipelineEmailNotification:
@@ -30,7 +25,6 @@ class PipelineEmailNotification:
     artifacts_dir: Path
     error: str | None = None
     warnings: list[str] | None = None
-
 
 def send_pipeline_completion_email(notification: PipelineEmailNotification) -> None:
     duration = notification.end_time - notification.start_time

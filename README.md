@@ -48,11 +48,12 @@ Supported settings include Ollama model/timeout, summary sizing caps, and SMTP d
 ### 4) Run the pipeline
 
 ```bash
-python main.py --projects data/projects.json --out-dir out
+python main.py --out-dir out
 ```
 
 Default behavior:
 - `days=10`
+- `projects=data/projects.json`
 - verbose INFO logging enabled
 - Ollama keep-alive set to `5m`
 

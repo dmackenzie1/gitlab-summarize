@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import csv
 import datetime as dt
 import json
 import re
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from utils.models import ActivitySummaryResult
 from utils.ollama import OllamaClient
@@ -15,11 +13,9 @@ from utils.prompts import build_activity_chunk_prompt, build_activity_rollup_pro
 MAX_TEXT_FIELD_CHARS = 700
 ACTIVITY_CHUNK_ROWS = 200
 
-
 def _slug(text: str) -> str:
     token = re.sub(r"[^a-zA-Z0-9._-]+", "_", text.strip())
     return token.strip("_") or "unknown"
-
 
 def _parse_dt(value: str | None) -> dt.datetime | None:
     if not value:
@@ -33,7 +29,6 @@ def _parse_dt(value: str | None) -> dt.datetime | None:
         return dt.datetime.fromisoformat(raw)
     except ValueError:
         return None
-
 
 def _extract_project_id(payload: object, source_file: Path) -> int | None:
     if isinstance(payload, dict):
@@ -71,7 +66,6 @@ def _extract_project_id(payload: object, source_file: Path) -> int | None:
             return int(token)
     return None
 
-
 def _activity_events(payload: object) -> list[dict]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
@@ -80,7 +74,6 @@ def _activity_events(payload: object) -> list[dict]:
         if isinstance(events, list):
             return [row for row in events if isinstance(row, dict)]
     return []
-
 
 def _csv_rows_to_events(rows: list[dict[str, str]]) -> list[dict]:
     events: list[dict] = []
@@ -105,7 +98,6 @@ def _csv_rows_to_events(rows: list[dict[str, str]]) -> list[dict]:
         )
     return events
 
-
 def _event_author(event: dict) -> str:
     author = event.get("author")
     if isinstance(author, dict):
@@ -119,14 +111,12 @@ def _event_author(event: dict) -> str:
             return val.strip()
     return "unknown"
 
-
 def _event_action(event: dict) -> str:
     action = str(event.get("action_name") or event.get("action") or event.get("event_name") or "activity").strip()
     target_type = str(event.get("target_type") or "").strip()
     if target_type and target_type.lower() not in action.lower():
         return f"{action} {target_type}".strip()
     return action or "activity"
-
 
 def _event_text(event: dict) -> str:
     note = event.get("note")
@@ -154,7 +144,6 @@ def _event_text(event: dict) -> str:
             return val.strip()
     return "(no details)"
 
-
 def _event_url(event: dict) -> str:
     for key in ("target_web_url", "url", "web_url"):
         value = event.get(key)
@@ -167,7 +156,6 @@ def _event_url(event: dict) -> str:
             return url.strip()
     return ""
 
-
 def _clean_text_for_llm(value: str) -> str:
     if not value:
         return ""
@@ -176,7 +164,6 @@ def _clean_text_for_llm(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip()
     value = value.replace("\t", " ")
     return truncate(value, MAX_TEXT_FIELD_CHARS, suffix=" ...")
-
 
 def _summarize_chunks(
     *,
@@ -247,13 +234,12 @@ def _summarize_chunks(
     rollup_cache_file.write_text(rollup_text + "\n", encoding="utf-8")
     return rollup_text, None, chunk_errors
 
-
 def process_activity_logs(
     *,
     out_dir: Path,
     days: int,
     include_ollama: bool,
-    ollama_client: Optional[OllamaClient],
+    ollama_client: OllamaClient | None,
     max_prompt_chars: int,
     log_item: Callable[[str], None] | None = None,
 ) -> ActivitySummaryResult:
@@ -267,18 +253,15 @@ def process_activity_logs(
     project_meta_file = Path("data/projects.json")
     project_name_by_id: dict[int, str] = {}
     if project_meta_file.exists():
-        try:
-            payload = json.loads(project_meta_file.read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                for row in payload:
-                    if not isinstance(row, dict):
-                        continue
-                    pid = row.get("project_id")
-                    pname = row.get("project_name")
-                    if isinstance(pid, int) and isinstance(pname, str) and pname.strip():
-                        project_name_by_id[pid] = pname.strip()
-        except json.JSONDecodeError:
-            pass
+        payload = json.loads(project_meta_file.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            for row in payload:
+                if not isinstance(row, dict):
+                    continue
+                pid = row.get("project_id")
+                pname = row.get("project_name")
+                if isinstance(pid, int) and isinstance(pname, str) and pname.strip():
+                    project_name_by_id[pid] = pname.strip()
 
     if not activity_dir.exists() or not activity_dir.is_dir():
         return ActivitySummaryResult({}, [])
@@ -457,7 +440,7 @@ def process_activity_logs(
             )
             summary_text = (
                 "## Activity highlights\n"
-                "- Generated without Ollama (`--no-ollama`).\n"
+                "- Generated without Ollama (disabled for this run).\n"
                 f"{bullet_lines}\n\n"
                 "## MRs / merges\n- N/A\n\n"
                 "## Notable discussions/comments\n- N/A\n\n"
