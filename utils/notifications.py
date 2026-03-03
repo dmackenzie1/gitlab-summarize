@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
 
-SMTP_HOST = "ndc_relay.ndc.nasa.gov"
+SMTP_HOST = "ndc-relay.ndc.nasa.gov"
 SMTP_PORT = 25
 EMAIL_FROM = "emss-no-reply@mail.nasa.gov"
 EMAIL_TO = "david.l.mackenzie@nasa.gov"
