@@ -154,10 +154,10 @@ Given `--out-dir <DIR>`:
 python main.py --projects data/projects.json --days 10 --out-dir out
 ```
 
-### Without Ollama (dry run for git artifacts)
+### Minimal run
 
 ```bash
-python main.py --no-ollama --projects data/projects.json --out-dir out
+python main.py --projects data/projects.json --out-dir out
 ```
 
 ### CI-friendly example

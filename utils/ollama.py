@@ -2,22 +2,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
-
 import requests
 
-
-@dataclass
-class OllamaError:
-    message: str
-    status_code: int | None = None
-    details: str | None = None
-
-
-@dataclass
-class OllamaResult:
-    text: str | None
-    error: OllamaError | None
+from utils.models import OllamaError, OllamaResult
 
 
 class OllamaClient:
