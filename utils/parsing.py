@@ -26,12 +26,9 @@ VERSION_SIGNAL_PATHS = [
     ".gitlab-ci/",
     "pyproject.toml",
     "requirements.txt",
-    "requirements-dev.txt",
     "uv.lock",
     "package-lock.json",
-    "pnpm-lock.yaml",
     "yarn.lock",
-    "poetry.lock",
 ]
 
 
