@@ -5,12 +5,12 @@ import json
 import logging
 import re
 import tempfile
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from utils.activity_logs import ActivitySummaryResult, process_activity_logs
-from utils.email_markup import render_email_markup
 from utils.git import (
     branch_has_recent_commits,
     diff_name_status,
@@ -95,6 +95,7 @@ class PipelineContext:
     branches_analyzed: int = 0
     errors: list[str] = field(default_factory=list)
     master_summary: str = "No repo summaries available."
+    started_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
 
 
 def _emit(stage: str, message: str) -> None:
@@ -226,6 +227,171 @@ def _persist_project_summary(context: PipelineContext, repo_key: str, lines: lis
     text = "\n".join(lines).rstrip() + "\n"
     (context.project_summaries_dir / f"{repo_key}.summary.markup").write_text(text, encoding="utf-8")
     context.repo_sections.append(text)
+
+
+def _clean_wrapped_hyphenation(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("\u00ad", "")
+    text = re.sub(r"(?<=\w)-\s+(?=\w)", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_bullets(text: str) -> list[str]:
+    bullets: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(("- ", "* ", "• ")):
+            candidate = line[2:].strip()
+        elif re.match(r"^\d+[\.)]\s+", line):
+            candidate = re.sub(r"^\d+[\.)]\s+", "", line)
+        else:
+            candidate = line
+        candidate = _clean_wrapped_hyphenation(candidate)
+        if candidate:
+            bullets.append(candidate)
+    return bullets
+
+
+def _normalized_text(text: str) -> str:
+    cleaned = _clean_wrapped_hyphenation(text).lower()
+    cleaned = re.sub(r"[^a-z0-9\s]", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _dedupe_bullets(bullets: list[str]) -> list[str]:
+    unique: list[str] = []
+    normalized: list[str] = []
+    for bullet in bullets:
+        key = _normalized_text(bullet)
+        if not key:
+            continue
+        if key in normalized:
+            continue
+        if any(SequenceMatcher(None, key, prior).ratio() >= 0.92 for prior in normalized):
+            continue
+        unique.append(bullet)
+        normalized.append(key)
+    return unique
+
+
+def _score_bullet(text: str) -> int:
+    score = 1
+    lowered = text.lower()
+    high_signal_terms = [
+        "major", "migration", "breaking", "bump", "upgrade", "security", "schema", "database",
+        "node", "python", "ci", "pipeline", "deploy", "feature", "api", "socket", "template",
+    ]
+    for term in high_signal_terms:
+        if term in lowered:
+            score += 2
+    if re.search(r"\bv?\d+\.\d+(\.\d+)?\b", lowered):
+        score += 1
+    return score
+
+
+def _top_bullets(bullets: list[str], limit: int) -> list[str]:
+    ranked = sorted(bullets, key=lambda item: (_score_bullet(item), len(item)), reverse=True)
+    return ranked[:limit]
+
+
+def _sentence_from_bullets(bullets: list[str], limit: int) -> str:
+    selected = bullets[:limit]
+    if not selected:
+        return "No significant engineering deltas were captured this week."
+    text = "; ".join(selected)
+    return text[0].upper() + text[1:] + ("." if not text.endswith(".") else "")
+
+
+def _build_management_bullets(context: PipelineContext) -> list[str]:
+    pool: list[str] = []
+    for repo_item in context.repo_items:
+        for _, summary in repo_item.branch_rollups:
+            pool.extend(_extract_bullets(summary))
+    for _, highlight in context.activity_result.highlights_for_master:
+        pool.extend(_extract_bullets(highlight))
+    return _top_bullets(_dedupe_bullets(pool), 6)
+
+
+def _build_cross_cutting_notes(context: PipelineContext) -> list[str]:
+    tags: dict[str, str] = {
+        "node": "Runtime baseline changes (Node) appear across multiple projects; validate runner/runtime compatibility.",
+        "template": "Shared CI/template changes landed in multiple repos; check inherited pipeline behavior.",
+        "migration": "Migration-oriented changes are present across projects; sequence rollout and validation carefully.",
+    }
+    all_text = " ".join(
+        " ".join(_extract_bullets(summary)) for item in context.repo_items for _, summary in item.branch_rollups
+    ).lower()
+    notes = [message for key, message in tags.items() if key in all_text]
+    return notes[:3]
+
+
+def _render_weekly_email_html(context: PipelineContext, model: str, days: int) -> str:
+    generated = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    duration = dt.datetime.now(dt.timezone.utc) - context.started_at
+    duration_min = max(1, int(duration.total_seconds() // 60))
+    status = "SUCCESS" if not context.errors else "SUCCESS (with warnings)"
+
+    parts = [
+        '<html><body style="font-family:Arial,Helvetica,sans-serif;color:#222;line-height:1.4">',
+        '<h2 style="margin:0 0 8px">Weekly Engineering Summary</h2>',
+        '<p style="margin:0 0 12px">'
+        f"Generated: {generated}<br>"
+        f"Window: last {days} days<br>"
+        f"Pipeline status: {status} · Duration: ~{duration_min} min · Projects: {len(context.projects)} · Branches analyzed: {context.branches_analyzed}"
+        + (f"<br>Model: {model}" if model and model != "disabled" else "")
+        + "</p>",
+        "<h3>Overall Summary</h3>",
+        "<ul>",
+    ]
+    for bullet in _build_management_bullets(context)[:6]:
+        parts.append(f"<li>{bullet}</li>")
+    parts.append("</ul>")
+
+    cross_cutting = _build_cross_cutting_notes(context)
+    if cross_cutting:
+        parts.append("<h3>Cross-cutting Notes</h3><ul>")
+        for note in cross_cutting:
+            parts.append(f"<li>{note}</li>")
+        parts.append("</ul>")
+
+    for repo_item in context.repo_items:
+        combined: list[str] = []
+        for _, summary in repo_item.branch_rollups:
+            combined.extend(_extract_bullets(summary))
+        if repo_item.activity_rollup:
+            combined.extend(_extract_bullets(repo_item.activity_rollup))
+        combined = _dedupe_bullets(combined)
+        if not combined:
+            continue
+
+        technical = _top_bullets(combined, 4)
+        major = _top_bullets(combined, 6)
+        action_needed = [
+            b for b in combined
+            if any(token in b.lower() for token in ["migration", "verify", "run", "smoke test", "upgrade", "action"])
+        ][:2]
+
+        parts.append(f"<h3>{repo_item.repo_display}</h3>")
+        parts.append(f"<p><strong>Management summary:</strong> {_sentence_from_bullets(major, 2)}</p>")
+        parts.append("<p><strong>Technical summary:</strong></p><ul>")
+        for bullet in technical:
+            parts.append(f"<li>{bullet}</li>")
+        parts.append("</ul>")
+        parts.append("<p><strong>Major changes:</strong></p><ul>")
+        for bullet in major:
+            parts.append(f"<li>{bullet}</li>")
+        parts.append("</ul>")
+        if action_needed:
+            parts.append("<p><strong>Action needed:</strong></p><ul>")
+            for bullet in action_needed:
+                parts.append(f"<li>{bullet}</li>")
+            parts.append("</ul>")
+
+    parts.append("</body></html>\n")
+    return "\n".join(parts)
 
 
 def process_activity_stage(context: PipelineContext) -> None:
@@ -547,7 +713,11 @@ def render_outputs(context: PipelineContext) -> PipelineRunResult:
     weekly_file.write_text(weekly_markup, encoding="utf-8")
 
     _emit("RENDER", "writing weeklySummary.email.markup")
-    weekly_email = render_email_markup(weekly_markup, title="Weekly Engineering Summary")
+    weekly_email = _render_weekly_email_html(
+        context,
+        context.ollama_client.model if context.ollama_client else "disabled",
+        context.days,
+    )
     (context.out_dir / "weeklySummary.email.markup").write_text(weekly_email, encoding="utf-8")
 
     logging.info("Wrote %s", weekly_file)
