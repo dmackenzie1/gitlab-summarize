@@ -54,5 +54,12 @@
     "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-transcribe.git",
     "activity_api": "https://eegitlab.fit.nasa.gov/api/v4/projects/1299/events?per_page=200",
     "is_default": true
-  }
+  },
+  {
+      "project_name": "emss/talky-capture",
+      "project_id": 1297,
+      "ssh_url": "git@jsfitpeegitlab.ndc.nasa.gov:emss/talky-capture.git",
+      "activity_link": "https://eegitlab.fit.nasa.gov/emss/talky-capture/-/activity",
+      "is_default": true
+  },
 ]
