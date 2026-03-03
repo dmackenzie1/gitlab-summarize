@@ -22,6 +22,7 @@ class WeeklyEmailFormatTests(unittest.TestCase):
             max_patch_chars=1000,
             max_prompt_chars=1000,
             max_files_in_patch=10,
+            force_resummarize=False,
             artifacts_root=Path("."),
             prompt_cache_dir=Path("."),
             errors_dir=Path("."),
@@ -49,6 +50,7 @@ class WeeklyEmailFormatTests(unittest.TestCase):
 
         self.assertEqual(html.count("Weekly Engineering Summary"), 1)
         self.assertIn("Management Summary", html)
+        self.assertNotIn("Primary outcome", html)
         self.assertIn("Key Changes", html)
         self.assertNotIn("da- tabase", html)
         self.assertNotIn("### Activity", html)
