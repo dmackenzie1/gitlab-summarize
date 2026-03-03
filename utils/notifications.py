@@ -5,6 +5,7 @@ import logging
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
+import html
 from pathlib import Path
 
 SMTP_HOST = "ndc_relay.ndc.nasa.gov"
@@ -54,6 +55,30 @@ def send_pipeline_completion_email(notification: PipelineEmailNotification) -> N
     message["From"] = EMAIL_FROM
     message["To"] = EMAIL_TO
     message.set_content("\n".join(body) + "\n")
+
+    summary_markup_path = notification.artifacts_dir.parent / "weeklySummary.email.markup"
+    if summary_markup_path.exists():
+        summary_html = summary_markup_path.read_text(encoding="utf-8")
+        status_section = "\n".join(
+            [
+                '<section style="margin-bottom:18px;padding:12px;border:1px solid #ddd;border-radius:6px;background:#fafafa">',
+                f"<h3 style=\"margin:0 0 8px 0\">Pipeline status: {html.escape(status)}</h3>",
+                "<ul style=\"margin:0;padding-left:18px\">",
+                f"<li>Start (UTC): {html.escape(notification.start_time.isoformat())}</li>",
+                f"<li>End (UTC): {html.escape(notification.end_time.isoformat())}</li>",
+                f"<li>Duration: {html.escape(str(duration))}</li>",
+                f"<li>Projects processed: {notification.projects_processed}</li>",
+                f"<li>Branches analyzed: {notification.branches_analyzed}</li>",
+                "</ul>",
+                "</section>",
+            ]
+        )
+        if "</body>" in summary_html:
+            html_body = summary_html.replace("</body>", f"{status_section}\n</body>", 1)
+        else:
+            html_body = f"<html><body>{summary_html}\n{status_section}</body></html>"
+
+        message.add_alternative(html_body, subtype="html")
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as smtp:
