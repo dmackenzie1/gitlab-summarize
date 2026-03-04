@@ -1,15 +1,15 @@
 import unittest
 from pathlib import Path
 
-from utils.models import ActivitySummaryResult
-from utils.summary import PipelineContext, RepoWorkItem, _clean_wrapped_hyphenation, _render_weekly_email_html
+from utils.models import ActivitySummaryResult, Context
+from utils.summary import RepoWorkItem, _clean_wrapped_hyphenation, _render_weekly_email_html
 
 class WeeklyEmailFormatTests(unittest.TestCase):
     def test_hyphenation_cleanup(self):
         self.assertEqual(_clean_wrapped_hyphenation("his- torical da- tabase execu- tion"), "historical database execution")
 
     def test_combined_repo_section_and_single_title(self):
-        context = PipelineContext(
+        context = Context(
             projects=[{"project_name": "emss/aegis", "ssh_url": "git@example.com:aegis.git"}],
             remote="origin",
             days=10,

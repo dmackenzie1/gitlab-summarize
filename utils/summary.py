@@ -6,6 +6,7 @@ import tempfile
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from utils.activity_logs import process_activity_logs
 from utils.aider import AiderClient
@@ -26,10 +27,8 @@ from utils.git import (
     git_rev_parse,
     git_current_branch,
 )
-from utils.models import ActivitySummaryResult
-from utils.ollama import OllamaClient
+from utils.models import Context, RunResult
 from utils.parsing import (
-    chunk_text,
     coerce_text,
     is_noisy_path,
     path_is_version_signal,
@@ -38,6 +37,9 @@ from utils.parsing import (
     unique_preserve_order,
 )
 from utils.prompts import build_branch_prompt, build_repo_rollup_prompt
+
+if TYPE_CHECKING:
+    from utils.ollama import OllamaClient
 
 MAX_PER_FILE_DIFF_LINES = 1200
 
@@ -48,14 +50,6 @@ _VERSION_PATTERNS = [
     re.compile(r"\bpython\b[^\n]*\b(\d+\.\d+(\.\d+)?)\b", re.IGNORECASE),
     re.compile(r"\bkaniko\b[^\n]*\b(v?\d+\.\d+\.\d+)\b", re.IGNORECASE),
 ]
-
-@dataclass
-class PipelineRunResult:
-    exit_code: int
-    projects_processed: int
-    branches_analyzed: int
-    artifacts_root: Path
-    errors: list[str]
 
 @dataclass
 class RepoWorkItem:
@@ -71,36 +65,6 @@ class RepoWorkItem:
     branch_rollups: list[tuple[str, str]] = field(default_factory=list)
     branch_change_stats: list[tuple[str, int, int, int]] = field(default_factory=list)
     merge_count: int = 0
-
-@dataclass
-class PipelineContext:
-    projects: list[dict]
-    remote: str
-    days: int
-    out_dir: Path
-    cache_dir: Path
-    use_temp: bool
-    offline: bool
-    include_ollama: bool
-    ollama_client: OllamaClient | None
-    summarizer: str
-    aider_cmd: str
-    aider_model: str
-    max_patch_chars: int
-    max_prompt_chars: int
-    max_files_in_patch: int
-    force_resummarize: bool
-    artifacts_root: Path
-    prompt_cache_dir: Path
-    errors_dir: Path
-    project_summaries_dir: Path
-    activity_result: ActivitySummaryResult = field(default_factory=lambda: ActivitySummaryResult({}, []))
-    work_root: Path | None = None
-    project_summaries_for_master: list[tuple[str, str]] = field(default_factory=list)
-    repo_items: list[RepoWorkItem] = field(default_factory=list)
-    branches_analyzed: int = 0
-    errors: list[str] = field(default_factory=list)
-    started_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
 
 def _emit(stage: str, message: str) -> None:
     print(f"[{stage}] {message}", flush=True)
@@ -129,7 +93,7 @@ def load_config(path: Path, only_default: bool) -> list[dict]:
     _emit("CONFIG", f"{path} missing; falling back to {fallback}")
     return read_projects(fallback, only_default=only_default)
 
-def init_pipeline_context(
+def init_context(
     *,
     projects: list[dict],
     remote: str,
@@ -139,7 +103,7 @@ def init_pipeline_context(
     use_temp: bool,
     offline: bool,
     include_ollama: bool,
-    ollama_client: OllamaClient | None,
+    ollama_client: "OllamaClient | None",
     summarizer: str,
     aider_cmd: str,
     aider_model: str,
@@ -147,7 +111,7 @@ def init_pipeline_context(
     max_prompt_chars: int,
     max_files_in_patch: int,
     force_resummarize: bool,
-) -> PipelineContext:
+) -> Context:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts_root = out_dir / "artifacts"
     artifacts_root.mkdir(parents=True, exist_ok=True)
@@ -157,7 +121,7 @@ def init_pipeline_context(
     errors_dir.mkdir(parents=True, exist_ok=True)
     project_summaries_dir = artifacts_root / "project_summaries"
     project_summaries_dir.mkdir(parents=True, exist_ok=True)
-    return PipelineContext(
+    return Context(
         projects=projects,
         remote=remote,
         days=days,
@@ -179,6 +143,9 @@ def init_pipeline_context(
         errors_dir=errors_dir,
         project_summaries_dir=project_summaries_dir,
     )
+
+
+init_pipeline_context = init_context
 
 def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[str]) -> list[str]:
     from utils.git import git_run
@@ -232,7 +199,7 @@ def _extract_paths_from_name_status(name_status_rows: list[str]) -> list[str]:
 def _cache_path(cache_root: Path, key: dict) -> Path:
     return cache_root / f"{stable_json_hash(key)}.txt"
 
-def _persist_project_summary(context: PipelineContext, repo_key: str, lines: list[str]) -> None:
+def _persist_project_summary(context: Context, repo_key: str, lines: list[str]) -> None:
     text = "\n".join(lines).rstrip() + "\n"
     (context.project_summaries_dir / f"{repo_key}.summary.markup").write_text(text, encoding="utf-8")
 
@@ -340,7 +307,7 @@ def _normalize_for_cross_project(text: str) -> str:
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
 
-def _build_project_bullets(context: PipelineContext) -> dict[str, list[str]]:
+def _build_project_bullets(context: Context) -> dict[str, list[str]]:
     project_bullets: dict[str, list[str]] = {}
     for repo_item in sorted(context.repo_items, key=lambda item: item.repo_display.lower()):
         combined: list[str] = []
@@ -380,7 +347,7 @@ def _is_version_or_library_update(text: str) -> bool:
     markers = ["version", "upgrade", "bump", "dependency", "dependencies", "node", "python", "npm", "library"]
     return any(marker in lowered for marker in markers) or bool(re.search(r"\bv?\d+\.\d+(\.\d+)?\b", lowered))
 
-def _build_overall_highlights(context: PipelineContext, cross_project_updates: list[str], project_bullets: dict[str, list[str]]) -> list[str]:
+def _build_overall_highlights(context: Context, cross_project_updates: list[str], project_bullets: dict[str, list[str]]) -> list[str]:
     highlights: list[str] = []
     active_branch_total = sum(len(item.active_branches) for item in context.repo_items)
     if active_branch_total:
@@ -433,7 +400,7 @@ def _sentence_from_bullets(bullets: list[str], limit: int) -> str:
     text = "; ".join(selected)
     return text[0].upper() + text[1:] + ("." if not text.endswith(".") else "")
 
-def _render_weekly_email_html(context: PipelineContext, days: int) -> str:
+def _render_weekly_email_html(context: Context, days: int) -> str:
     generated = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     duration = dt.datetime.now(dt.timezone.utc) - context.started_at
     duration_min = max(1, int(duration.total_seconds() // 60))
@@ -494,7 +461,7 @@ def _render_weekly_email_html(context: PipelineContext, days: int) -> str:
     parts.append("</body></html>\n")
     return "\n".join(parts)
 
-def process_activity_stage(context: PipelineContext) -> None:
+def process_activity_ranges(context: Context) -> None:
     _emit("ACTIVITY", "processing project_activity inputs")
     context.activity_result = process_activity_logs(
         out_dir=context.out_dir,
@@ -505,7 +472,7 @@ def process_activity_stage(context: PipelineContext) -> None:
         log_item=lambda msg: _emit("ACTIVITY", msg),
     )
 
-def sync_repos(context: PipelineContext) -> None:
+def sync_repos(context: Context) -> None:
     context.work_root = Path(tempfile.mkdtemp(prefix="weekly_repo_cache_")) if context.use_temp else context.cache_dir
     if not context.use_temp:
         context.work_root.mkdir(parents=True, exist_ok=True)
@@ -569,7 +536,7 @@ def sync_repos(context: PipelineContext) -> None:
                 work_item.lines.append(f"  - {m['date']} {m['subject']} ({m['author']})")
         context.repo_items.append(work_item)
 
-def _call_or_cache(context: PipelineContext, prompt: str, scope: dict, force_refresh: bool = False) -> tuple[str | None, str | None]:
+def _call_or_cache(context: Context, prompt: str, scope: dict, force_refresh: bool = False) -> tuple[str | None, str | None]:
     if not context.include_ollama or context.ollama_client is None:
         return None, None
     key = {
@@ -590,214 +557,159 @@ def _call_or_cache(context: PipelineContext, prompt: str, scope: dict, force_ref
     cpath.write_text(text + "\n", encoding="utf-8")
     return text, None
 
-def process_repo_branches(context: PipelineContext) -> None:
-    for repo_item in context.repo_items:
-        if not repo_item.active_branches:
+def _branch_artifact_paths(context: Context, repo_item: RepoWorkItem, safe_branch: str) -> tuple[Path, Path, Path, Path]:
+    patch_path = repo_item.repo_art_dir / f"{safe_branch}.patch.txt"
+    prompt_path = repo_item.repo_art_dir / f"{safe_branch}.prompt.txt"
+    summary_path = repo_item.repo_art_dir / f"{safe_branch}.{context.summarizer}.summary.txt"
+    metadata_path = repo_item.repo_art_dir / f"{safe_branch}.summary.metadata.json"
+    return patch_path, prompt_path, summary_path, metadata_path
+
+
+def build_repo_branches(context: Context, repo_item: RepoWorkItem) -> None:
+    if not repo_item.active_branches:
+        return
+    context.branches_analyzed += len(repo_item.active_branches)
+
+    for branch in repo_item.active_branches:
+        _emit("BRANCH", f"{repo_item.repo_display} {branch}")
+        safe_branch = branch.replace("/", "__")
+        patch_path, prompt_path, summary_path, metadata_path = _branch_artifact_paths(context, repo_item, safe_branch)
+        if branch == repo_item.parent:
+            summary_path.write_text("Baseline branch (parent). No diff computed.\n", encoding="utf-8")
             continue
-        context.branches_analyzed += len(repo_item.active_branches)
 
-        for branch in repo_item.active_branches:
-            _emit("BRANCH", f"{repo_item.repo_display} {branch}")
-            safe_branch = branch.replace("/", "__")
-            patch_path = repo_item.repo_art_dir / f"{safe_branch}.patch.txt"
-            prompt_path = repo_item.repo_art_dir / f"{safe_branch}.prompt.txt"
-            summary_path = repo_item.repo_art_dir / f"{safe_branch}.summary.txt"
-            if branch == repo_item.parent:
-                summary_path.write_text(
-                    "Baseline branch (parent). No diff computed.\n", encoding="utf-8"
-                )
-                continue
+        base = git_merge_base(repo_item.repo_dir, repo_item.parent, branch)
+        head = git_rev_parse(repo_item.repo_dir, branch)
+        if not base or not head:
+            continue
 
-            base = git_merge_base(repo_item.repo_dir, repo_item.parent, branch)
-            head = git_rev_parse(repo_item.repo_dir, branch)
-            if not base or not head:
-                continue
+        stat = git_diff_stat(repo_item.repo_dir, base, head)
+        name_status = git_diff_name_status(repo_item.repo_dir, base, head)
+        num = git_diff_numstat(repo_item.repo_dir, base, head)
+        additions = sum(added for _, added, _ in num)
+        deletions = sum(deleted for _, _, deleted in num)
+        repo_item.branch_change_stats.append((branch, len(num), additions, deletions))
 
-            stat = git_diff_stat(repo_item.repo_dir, base, head)
-            name_status = git_diff_name_status(repo_item.repo_dir, base, head)
-            num = git_diff_numstat(repo_item.repo_dir, base, head)
-            additions = sum(added for _, added, _ in num)
-            deletions = sum(deleted for _, _, deleted in num)
-            repo_item.branch_change_stats.append((branch, len(num), additions, deletions))
-
-            if patch_path.exists() and prompt_path.exists() and summary_path.exists() and not context.force_resummarize:
-                existing_summary = summary_path.read_text(encoding="utf-8").strip()
-                _emit("BRANCH", f"{repo_item.repo_display} {branch} reused_existing_artifacts=true")
-                if existing_summary and not existing_summary.startswith("ERROR:"):
-                    repo_item.lines.append(f"### {branch}")
-                    repo_item.lines.append(existing_summary)
-                    repo_item.lines.append("")
-                    repo_item.branch_rollups.append((branch, existing_summary))
-                else:
-                    repo_item.lines.append(f"### {branch}")
-                    repo_item.lines.append("- Summary unavailable (existing artifact contains error).")
-                continue
-
-            chosen_paths = _select_patch_candidate_paths(num, context.max_files_in_patch)
-            changed_paths = _extract_paths_from_name_status(name_status)
-            version_paths = [path for path in changed_paths if path_is_version_signal(path)]
-            version_signals = extract_version_signals(repo_item.repo_dir, base, head, version_paths)
-
-            if context.force_resummarize and patch_path.exists():
-                patch = truncate(patch_path.read_text(encoding="utf-8"), context.max_patch_chars)
+        if patch_path.exists() and prompt_path.exists() and summary_path.exists() and not context.force_resummarize:
+            existing_summary = summary_path.read_text(encoding="utf-8").strip()
+            _emit("BRANCH", f"{repo_item.repo_display} {branch} reused_existing_artifacts=true")
+            if existing_summary and not existing_summary.startswith("ERROR:"):
+                repo_item.lines.extend([f"### {branch}", existing_summary, ""])
+                repo_item.branch_rollups.append((branch, existing_summary))
             else:
-                patch = truncate(git_diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
-                patch_path.write_text(patch, encoding="utf-8")
+                repo_item.lines.extend([f"### {branch}", "- Summary unavailable (existing artifact contains error)."])
+            continue
 
-            prompt = truncate(
-                build_branch_prompt(repo_item.repo_display, branch, repo_item.parent, stat, patch, version_signals),
-                context.max_prompt_chars,
-                suffix="\n\n[...prompt truncated...]\n",
-            )
-            prompt_path.write_text(prompt, encoding="utf-8")
+        chosen_paths = _select_patch_candidate_paths(num, context.max_files_in_patch)
+        changed_paths = _extract_paths_from_name_status(name_status)
+        version_paths = [path for path in changed_paths if path_is_version_signal(path)]
+        version_signals = extract_version_signals(repo_item.repo_dir, base, head, version_paths)
 
-            summary_text: str | None = None
-            if context.summarizer == "aider":
-                orig_branch = git_current_branch(repo_item.repo_dir)
-                aider_client = AiderClient(context.aider_cmd, context.aider_model)
-                checkout_err = None
-                if orig_branch:
-                    checkout_res = git_checkout(repo_item.repo_dir, branch)
-                    if not checkout_res.ok:
-                        checkout_err = checkout_res.stderr.strip() or "checkout failed"
-                if checkout_err:
-                    summary_text = None
+        if context.force_resummarize and patch_path.exists():
+            patch = truncate(patch_path.read_text(encoding="utf-8"), context.max_patch_chars)
+        else:
+            patch = truncate(git_diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
+            patch_path.write_text(patch, encoding="utf-8")
+
+        prompt = truncate(
+            build_branch_prompt(repo_item.repo_display, branch, repo_item.parent, stat, patch, version_signals),
+            context.max_prompt_chars,
+            suffix="\n\n[...prompt truncated...]\n",
+        )
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+        summary_text: str | None = None
+        if context.summarizer == "aider":
+            orig_branch = git_current_branch(repo_item.repo_dir)
+            aider_client = AiderClient(context.aider_cmd, context.aider_model)
+            checkout_err = None
+            if orig_branch:
+                checkout_res = git_checkout(repo_item.repo_dir, branch)
+                if not checkout_res.ok:
+                    checkout_err = checkout_res.stderr.strip() or "checkout failed"
+            if checkout_err:
+                ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_checkout.log").write_text(
+                    json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": checkout_err}, indent=2),
+                    encoding="utf-8",
+                )
+            else:
+                aider_result = aider_client.summarize_branch_diff(
+                    repo_dir=repo_item.repo_dir,
+                    repo_display=repo_item.repo_display,
+                    branch=branch,
+                    parent_branch=repo_item.parent,
+                    stat=stat,
+                    patch=patch,
+                )
+                summary_text = aider_result.text
+                if aider_result.error:
                     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                    (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_checkout.log").write_text(
-                        json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": checkout_err}, indent=2),
+                    (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_aider.log").write_text(
+                        json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": aider_result.error}, indent=2),
                         encoding="utf-8",
                     )
-                else:
-                    aider_result = aider_client.summarize_branch_diff(
-                        repo_dir=repo_item.repo_dir,
-                        repo_display=repo_item.repo_display,
-                        branch=branch,
-                        parent_branch=repo_item.parent,
-                        stat=stat,
-                        patch=patch,
-                    )
-                    summary_text = aider_result.text
-                    if aider_result.error:
-                        call_err = aider_result.error
-                        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                        (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_aider.log").write_text(
-                            json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": call_err}, indent=2),
-                            encoding="utf-8",
-                        )
-                if orig_branch and orig_branch != branch:
-                    git_checkout(repo_item.repo_dir, orig_branch)
-            elif context.include_ollama:
-                patch_chunks = chunk_text(patch, max(1000, context.max_patch_chars // 2), overlap=500)
-                if len(patch_chunks) > 1:
-                    chunk_summaries: list[str] = []
-                    for i, chunk in enumerate(patch_chunks, 1):
-                        chunk_prompt = build_branch_prompt(
-                            repo_item.repo_display,
-                            f"{branch} [chunk {i}/{len(patch_chunks)}]",
-                            repo_item.parent,
-                            stat,
-                            chunk,
-                            version_signals,
-                        )
-                        chunk_prompt = truncate(chunk_prompt, context.max_prompt_chars, suffix="\n\n[...prompt truncated...]\n")
-                        chunk_summary, chunk_err = _call_or_cache(
-                            context,
-                            chunk_prompt,
-                            {"repo": repo_item.repo_display, "branch": branch, "chunk": i},
-                            force_refresh=context.force_resummarize,
-                        )
-                        if chunk_err:
-                            summary_text = None
-                            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                            (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_chunk{i}.log").write_text(
-                                json.dumps(
-                                    {
-                                        "repo": repo_item.repo_display,
-                                        "branch": branch,
-                                        "model": context.ollama_client.model if context.ollama_client else "",
-                                        "error": chunk_err,
-                                    },
-                                    indent=2,
-                                ),
-                                encoding="utf-8",
-                            )
-                            break
-                        chunk_summaries.append(chunk_summary or "")
-                    if chunk_summaries:
-                        merged_prompt = build_repo_rollup_prompt(
-                            repo_item.repo_display,
-                            [(f"chunk-{idx + 1}", val) for idx, val in enumerate(chunk_summaries)],
-                        )
-                        summary_text, final_err = _call_or_cache(
-                            context,
-                            merged_prompt,
-                            {"repo": repo_item.repo_display, "branch": branch, "stage": "chunk_rollup"},
-                            force_refresh=context.force_resummarize,
-                        )
-                        if final_err:
-                            summary_text = None
-                else:
-                    summary_text, call_err = _call_or_cache(
-                        context,
-                        prompt,
-                        {"repo": repo_item.repo_display, "branch": branch},
-                        force_refresh=context.force_resummarize,
-                    )
-                    if call_err:
-                        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                        (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}.log").write_text(
-                            json.dumps(
-                                {
-                                    "repo": repo_item.repo_display,
-                                    "branch": branch,
-                                    "model": context.ollama_client.model if context.ollama_client else "",
-                                    "url": context.ollama_client.url if context.ollama_client else "",
-                                    "error": call_err,
-                                    "max_patch_chars": context.max_patch_chars,
-                                    "max_prompt_chars": context.max_prompt_chars,
-                                },
-                                indent=2,
-                            ),
-                            encoding="utf-8",
-                        )
-
-            if summary_text:
-                summary_path.write_text(summary_text + "\n", encoding="utf-8")
-                repo_item.lines.append(f"### {branch}")
-                repo_item.lines.append(summary_text)
-                repo_item.lines.append("")
-                repo_item.branch_rollups.append((branch, summary_text))
-            else:
-                summary_path.write_text("ERROR: summary unavailable\n", encoding="utf-8")
-                repo_item.lines.append(f"### {branch}")
-                repo_item.lines.append("- Summary unavailable (see artifacts/errors logs).")
-
-def build_rollups(context: PipelineContext) -> None:
-    for repo_item in context.repo_items:
-        if repo_item.branch_rollups and context.include_ollama:
-            _emit("ROLLUP", f"repo {repo_item.repo_display} branches={len(repo_item.branch_rollups)}")
-            rollup_prompt = truncate(
-                build_repo_rollup_prompt(repo_item.repo_display, repo_item.branch_rollups),
-                context.max_prompt_chars,
-                suffix="\n\n[...prompt truncated...]\n",
+            if orig_branch and orig_branch != branch:
+                git_checkout(repo_item.repo_dir, orig_branch)
+        elif context.include_ollama:
+            summary_text, _ = _call_or_cache(
+                context,
+                prompt,
+                {"repo": repo_item.repo_display, "branch": branch},
+                force_refresh=context.force_resummarize,
             )
-            (repo_item.repo_art_dir / "repo_rollup.prompt.txt").write_text(rollup_prompt, encoding="utf-8")
-            rollup, rollup_err = _call_or_cache(context, rollup_prompt, {"repo": repo_item.repo_display, "stage": "repo_rollup"}, force_refresh=context.force_resummarize)
-            if rollup:
-                (repo_item.repo_art_dir / "repo_rollup.summary.txt").write_text(rollup + "\n", encoding="utf-8")
-                context.project_summaries_for_master.append((repo_item.repo_display, rollup))
-            elif rollup_err:
-                context.errors.append(f"{repo_item.repo_display}: repo rollup failed: {rollup_err}")
 
-        repo_item.lines.append("### Activity")
-        if repo_item.activity_rollup:
-            repo_item.lines.append(repo_item.activity_rollup.strip())
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "repo": repo_item.repo_display,
+                    "branch": branch,
+                    "summarizer": context.summarizer,
+                    "aider_model": context.aider_model if context.summarizer == "aider" else None,
+                    "ollama_model": context.ollama_client.model if context.ollama_client else None,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        if summary_text:
+            summary_path.write_text(summary_text + "\n", encoding="utf-8")
+            repo_item.lines.extend([f"### {branch}", summary_text, ""])
+            repo_item.branch_rollups.append((branch, summary_text))
         else:
-            repo_item.lines.append("- No activity rollup found for this project.")
-        repo_item.lines.append("")
-        _persist_project_summary(context, repo_item.repo_key, repo_item.lines)
+            summary_path.write_text("ERROR: summary unavailable\n", encoding="utf-8")
+            repo_item.lines.extend([f"### {branch}", "- Summary unavailable (see artifacts/errors logs)."])
 
-def build_master_summary(context: PipelineContext) -> None:
+
+def build_project_rollup(context: Context, repo_item: RepoWorkItem) -> None:
+    if repo_item.branch_rollups and context.include_ollama:
+        _emit("ROLLUP", f"repo {repo_item.repo_display} branches={len(repo_item.branch_rollups)}")
+        rollup_prompt = truncate(
+            build_repo_rollup_prompt(repo_item.repo_display, repo_item.branch_rollups),
+            context.max_prompt_chars,
+            suffix="\n\n[...prompt truncated...]\n",
+        )
+        (repo_item.repo_art_dir / "repo_rollup.prompt.txt").write_text(rollup_prompt, encoding="utf-8")
+        rollup, rollup_err = _call_or_cache(
+            context,
+            rollup_prompt,
+            {"repo": repo_item.repo_display, "stage": "repo_rollup"},
+            force_refresh=context.force_resummarize,
+        )
+        if rollup:
+            (repo_item.repo_art_dir / "repo_rollup.summary.txt").write_text(rollup + "\n", encoding="utf-8")
+            context.project_summaries_for_master.append((repo_item.repo_display, rollup))
+        elif rollup_err:
+            context.errors.append(f"{repo_item.repo_display}: repo rollup failed: {rollup_err}")
+
+    repo_item.lines.append("### Activity")
+    repo_item.lines.append(repo_item.activity_rollup.strip() if repo_item.activity_rollup else "- No activity rollup found for this project.")
+    repo_item.lines.append("")
+    _persist_project_summary(context, repo_item.repo_key, repo_item.lines)
+
+def build_master_summary(context: Context) -> None:
     if not context.project_summaries_for_master or not context.include_ollama or context.ollama_client is None:
         return
     _emit("ROLLUP", f"master from repos={len(context.project_summaries_for_master)}")
@@ -826,7 +738,7 @@ def build_master_summary(context: PipelineContext) -> None:
     (context.artifacts_root / "master_summary.summary.txt").write_text(summary_text + "\n", encoding="utf-8")
 
 def _render_weekly_markup(
-    context: PipelineContext,
+    context: Context,
     days: int,
 ) -> str:
     stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
@@ -875,7 +787,7 @@ def _render_weekly_markup(
     lines.append("")
     return "\n".join(lines)
 
-def render_outputs(context: PipelineContext) -> PipelineRunResult:
+def render_outputs(context: Context) -> RunResult:
     _emit("RENDER", "writing weeklySummary.markup")
     weekly_markup = _render_weekly_markup(
         context,
@@ -892,7 +804,7 @@ def render_outputs(context: PipelineContext) -> PipelineRunResult:
     (context.out_dir / "weeklySummary.email.markup").write_text(weekly_email, encoding="utf-8")
 
     logging.info("Wrote %s", weekly_file)
-    return PipelineRunResult(
+    return RunResult(
         exit_code=0,
         projects_processed=len(context.projects),
         branches_analyzed=context.branches_analyzed,

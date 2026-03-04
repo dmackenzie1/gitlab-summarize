@@ -9,19 +9,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from utils.notifications import PipelineEmailNotification, send_pipeline_completion_email
+from utils.notifications import EmailData, send_pipeline_notification_email
 from utils.ollama import OllamaClient
 from utils.summary import (
-    PipelineRunResult,
     build_master_summary,
-    build_rollups,
-    init_pipeline_context,
+    build_project_rollup,
+    build_repo_branches,
+    init_context,
     load_config,
-    process_activity_stage,
-    process_repo_branches,
+    process_activity_ranges,
     render_outputs,
     sync_repos,
 )
+from utils.models import RunResult
 
 REMOTE_DEFAULT = "origin"
 OLLAMA_URL_DEFAULT = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def _build_ollama_client(args: argparse.Namespace) -> OllamaClient:
-    logging.info("Phase 1/7: Initializing Ollama client")
+    logging.info("Initializing Ollama client")
     return OllamaClient(
         url=args.ollama_url,
         model=args.ollama_model,
@@ -75,38 +75,11 @@ def _build_ollama_client(args: argparse.Namespace) -> OllamaClient:
         keep_alive=(args.ollama_keep_alive or None),
     )
 
-def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient) -> PipelineRunResult:
-    projects = load_config(Path(args.projects).resolve(), only_default=args.only_default)
-    context = init_pipeline_context(
-        projects=projects,
-        remote=REMOTE_DEFAULT,
-        days=args.days,
-        out_dir=Path(args.out_dir).resolve(),
-        cache_dir=Path(args.cache_dir).resolve(),
-        use_temp=args.temp,
-        offline=args.offline,
-        include_ollama=(args.summarizer == "ollama"),
-        ollama_client=ollama_client,
-        summarizer=args.summarizer,
-        aider_cmd=args.aider_cmd,
-        aider_model=args.aider_model,
-        max_patch_chars=args.max_patch_chars,
-        max_prompt_chars=args.max_prompt_chars,
-        max_files_in_patch=args.max_files,
-        force_resummarize=args.resummarize,
-    )
-    process_activity_stage(context)
-    sync_repos(context)
-    process_repo_branches(context)
-    build_rollups(context)
-    build_master_summary(context)
-    return render_outputs(context)
-
 def main() -> int:
     args = parse_args()
     start_time = dt.datetime.now(dt.timezone.utc)
 
-    result = PipelineRunResult(
+    result = RunResult(
         exit_code=1,
         projects_processed=0,
         branches_analyzed=0,
@@ -116,8 +89,49 @@ def main() -> int:
     run_error = None
 
     try:
+        logging.info("Phase 1/8: Loading repositories configuration")
+        projects = load_config(Path(args.projects).resolve(), only_default=args.only_default)
+
         ollama_client = _build_ollama_client(args)
-        result = _run_pipeline(args, ollama_client)
+        context = init_context(
+            projects=projects,
+            remote=REMOTE_DEFAULT,
+            days=args.days,
+            out_dir=Path(args.out_dir).resolve(),
+            cache_dir=Path(args.cache_dir).resolve(),
+            use_temp=args.temp,
+            offline=args.offline,
+            include_ollama=(args.summarizer == "ollama"),
+            ollama_client=ollama_client,
+            summarizer=args.summarizer,
+            aider_cmd=args.aider_cmd,
+            aider_model=args.aider_model,
+            max_patch_chars=args.max_patch_chars,
+            max_prompt_chars=args.max_prompt_chars,
+            max_files_in_patch=args.max_files,
+            force_resummarize=args.resummarize,
+        )
+
+        logging.info("Phase 2/8: Syncing repositories")
+        sync_repos(context)
+
+        logging.info("Phase 3/8: Processing activity ranges")
+        process_activity_ranges(context)
+        for repo_item in context.repo_items:
+            repo_item.activity_rollup = context.activity_result.rollups_by_project_name.get(repo_item.repo_display)
+
+        logging.info("Phase 4/8: Building branch summaries and project rollups")
+        for repo_item in context.repo_items:
+            logging.info("Phase 4.1/8: build_repo_branches repo=%s", repo_item.repo_display)
+            build_repo_branches(context, repo_item)
+            logging.info("Phase 4.2/8: build_project_rollup repo=%s", repo_item.repo_display)
+            build_project_rollup(context, repo_item)
+
+        logging.info("Phase 5/8: Combining activity stages (already incorporated in project rollups)")
+        logging.info("Phase 6/8: Building master summary")
+        build_master_summary(context)
+        logging.info("Phase 7/8: Rendering outputs")
+        result = render_outputs(context)
         return_code = result.exit_code
     except Exception as exc:  # noqa: BLE001
         run_error = str(exc)
@@ -125,7 +139,7 @@ def main() -> int:
         return_code = 1
     finally:
         end_time = dt.datetime.now(dt.timezone.utc)
-        notification = PipelineEmailNotification(
+        email_data = EmailData(
             start_time=start_time,
             end_time=end_time,
             projects_processed=result.projects_processed,
@@ -134,8 +148,8 @@ def main() -> int:
             error=run_error,
             warnings=result.errors,
         )
-        logging.info("Phase 7/7: Sending completion email")
-        send_pipeline_completion_email(notification)
+        logging.info("Phase 8/8: Sending completion email")
+        send_pipeline_notification_email(email_data)
 
     return return_code
 
