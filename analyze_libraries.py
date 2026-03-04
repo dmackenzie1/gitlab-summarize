@@ -41,7 +41,21 @@ MANIFEST_FILENAMES = {
     "Dockerfile",
     "docker-compose.yml",
     "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
 }
+
+MANIFEST_GLOB_PATTERNS = (
+    "Dockerfile*",
+    "*Dockerfile",
+    "*Dockerfile*",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
+    "requirements*.txt",
+    "package-lock*.json",
+)
 
 EXCLUDE_DIRS = {
     ".git",
@@ -358,6 +372,27 @@ def extract_uv_lock(uv_lock_path: Path) -> Dict[str, str]:
 _APT_INSTALL_RE = re.compile(r"(?i)\bapt-get\s+install\b([^&;]+)")
 _APK_ADD_RE = re.compile(r"(?i)\bapk\s+add\b([^&;]+)")
 
+
+def parse_from_image(line: str) -> str:
+    tokens = line.split()
+    if len(tokens) < 2 or tokens[0].upper() != "FROM":
+        return ""
+
+    idx = 1
+    while idx < len(tokens) and tokens[idx].startswith("--"):
+        opt = tokens[idx]
+        idx += 1
+        # Options like "--platform linux/amd64" consume one extra token,
+        # while "--platform=linux/amd64" do not.
+        if "=" not in opt and idx < len(tokens) and not tokens[idx].startswith("--"):
+            idx += 1
+
+    if idx >= len(tokens):
+        return ""
+
+    return tokens[idx].strip()
+
+
 def extract_docker_signals(dockerfile_path: Path) -> Dict[str, str]:
     libs: Dict[str, str] = {}
     text = safe_read_text(dockerfile_path)
@@ -367,9 +402,8 @@ def extract_docker_signals(dockerfile_path: Path) -> Dict[str, str]:
         if not s or s.startswith("#"):
             continue
 
-        m = re.match(r"(?i)^FROM\s+([^\s]+)", s)
-        if m:
-            image = m.group(1).strip()
+        image = parse_from_image(s)
+        if image:
             key, tag = runtime_key_from_image(image)
             if key:
                 add_lib_keep_key(libs, key, tag or image)
@@ -459,8 +493,12 @@ def find_manifests(repo_root: Path) -> List[Path]:
         root_path = Path(root)
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
         for fn in files:
+            file_path = root_path / fn
             if fn in MANIFEST_FILENAMES or fn.lower() == "dockerfile":
-                manifests.append(root_path / fn)
+                manifests.append(file_path)
+                continue
+            if any(file_path.match(pattern) for pattern in MANIFEST_GLOB_PATTERNS):
+                manifests.append(file_path)
     return manifests
 
 
@@ -479,7 +517,7 @@ def parse_manifest(path: Path) -> Tuple[str, Dict[str, str]]:
 
     if name == "package.json":
         return ("package.json", extract_package_json(path))
-    if name in ("package-lock.json", "npm-shrinkwrap.json"):
+    if (name.startswith("package-lock") and name.endswith(".json")) or name == "npm-shrinkwrap.json":
         return (name, extract_package_lock(path))
 
     if name in (".nvmrc", ".node-version"):
@@ -488,9 +526,9 @@ def parse_manifest(path: Path) -> Tuple[str, Dict[str, str]]:
     if lname == "uv.lock":
         return ("uv.lock", extract_uv_lock(path))
 
-    if lname == "dockerfile" or name == "Dockerfile":
+    if "dockerfile" in lname:
         return ("Dockerfile", extract_docker_signals(path))
-    if name in ("docker-compose.yml", "docker-compose.yaml"):
+    if re.match(r"(?i)^(docker-)?compose.*\.ya?ml$", name):
         return (name, extract_compose_signals(path))
 
     # locks we aren't parsing fully yet; still signal presence
