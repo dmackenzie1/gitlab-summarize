@@ -41,6 +41,8 @@ MANIFEST_FILENAMES = {
     "Dockerfile",
     "docker-compose.yml",
     "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
 }
 
 EXCLUDE_DIRS = {
@@ -86,6 +88,30 @@ def iter_text_lines(path: Path) -> Iterable[str]:
 
 def stable_spec(spec: str) -> str:
     return (spec or "").strip()
+
+
+def is_dockerfile_name(filename: str) -> bool:
+    lname = (filename or "").lower()
+    return lname == "dockerfile" or lname.startswith("dockerfile.") or lname.endswith(".dockerfile")
+
+
+def is_compose_name(filename: str) -> bool:
+    lname = (filename or "").lower()
+    if lname in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+        return True
+    return lname.startswith("docker-compose.") and (lname.endswith(".yml") or lname.endswith(".yaml"))
+
+
+def is_manifest_filename(filename: str) -> bool:
+    if filename in MANIFEST_FILENAMES:
+        return True
+
+    lname = (filename or "").lower()
+    if lname.startswith("requirements") and lname.endswith(".txt"):
+        return True
+    if is_dockerfile_name(filename) or is_compose_name(filename):
+        return True
+    return False
 
 
 _IMAGE_DIGEST_SPLIT_RE = re.compile(r"@sha256:[0-9a-f]{16,}$", re.IGNORECASE)
@@ -459,7 +485,7 @@ def find_manifests(repo_root: Path) -> List[Path]:
         root_path = Path(root)
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
         for fn in files:
-            if fn in MANIFEST_FILENAMES or fn.lower() == "dockerfile":
+            if is_manifest_filename(fn):
                 manifests.append(root_path / fn)
     return manifests
 
@@ -488,9 +514,9 @@ def parse_manifest(path: Path) -> Tuple[str, Dict[str, str]]:
     if lname == "uv.lock":
         return ("uv.lock", extract_uv_lock(path))
 
-    if lname == "dockerfile" or name == "Dockerfile":
+    if is_dockerfile_name(name):
         return ("Dockerfile", extract_docker_signals(path))
-    if name in ("docker-compose.yml", "docker-compose.yaml"):
+    if is_compose_name(name):
         return (name, extract_compose_signals(path))
 
     # locks we aren't parsing fully yet; still signal presence
