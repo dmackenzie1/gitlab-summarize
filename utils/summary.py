@@ -39,6 +39,8 @@ from utils.parsing import (
 )
 from utils.prompts import build_branch_prompt, build_repo_rollup_prompt
 
+MAX_PER_FILE_DIFF_LINES = 1200
+
 _VERSION_PATTERNS = [
     re.compile(r"\bnode\b[^\n]*\b(\d+\.\d+\.\d+|\d+)\b", re.IGNORECASE),
     re.compile(r"\bnpm\b[^\n]*\b(\d+\.\d+\.\d+|\d+)\b", re.IGNORECASE),
@@ -203,6 +205,29 @@ def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[st
             label = current_path or "(unknown file)"
             signals.append(f"{label}: {text[:240]}")
     return unique_preserve_order(signals)
+
+def _select_patch_candidate_paths(numstat_rows: list[tuple[str, int, int]], max_files_in_patch: int) -> list[str]:
+    candidates: list[str] = []
+    for path, added, deleted in numstat_rows:
+        if is_noisy_path(path):
+            continue
+        if not path_is_version_signal(path) and (added + deleted) > MAX_PER_FILE_DIFF_LINES:
+            continue
+        candidates.append(path)
+    return candidates[:max_files_in_patch]
+
+
+def _extract_paths_from_name_status(name_status_rows: list[str]) -> list[str]:
+    paths: list[str] = []
+    for row in name_status_rows:
+        _status, sep, remainder = row.partition("\t")
+        if not sep or not remainder:
+            continue
+        if "\t" in remainder:
+            # Rename/copy rows can include old and new paths; prefer the new path.
+            remainder = remainder.rsplit("\t", 1)[-1]
+        paths.append(remainder.strip())
+    return paths
 
 def _cache_path(cache_root: Path, key: dict) -> Path:
     return cache_root / f"{stable_json_hash(key)}.txt"
@@ -608,16 +633,8 @@ def process_repo_branches(context: PipelineContext) -> None:
                     repo_item.lines.append("- Summary unavailable (existing artifact contains error).")
                 continue
 
-            MAX_PER_FILE_DIFF_LINES = 1200
-            candidate_paths: list[str] = []
-            for path, added, deleted in num:
-                if is_noisy_path(path):
-                    continue
-                if not path_is_version_signal(path) and (added + deleted) > MAX_PER_FILE_DIFF_LINES:
-                    continue
-                candidate_paths.append(path)
-            chosen_paths = candidate_paths[: context.max_files_in_patch]
-            changed_paths = [row.split("	")[-1] for row in name_status if "	" in row]
+            chosen_paths = _select_patch_candidate_paths(num, context.max_files_in_patch)
+            changed_paths = _extract_paths_from_name_status(name_status)
             version_paths = [path for path in changed_paths if path_is_version_signal(path)]
             version_signals = extract_version_signals(repo_item.repo_dir, base, head, version_paths)
 
