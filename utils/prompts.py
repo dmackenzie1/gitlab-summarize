@@ -7,9 +7,10 @@ BRANCH_SUMMARY_INTRO = (
 
 BRANCH_SUMMARY_RETURN_SPEC = (
     "Return:\n"
-    "- 3-8 bullet points: behavior/capability changes\n"
-    "- 0-3 bullet points: risks/breaking changes\n"
-    "- 0-3 bullet points: significant version/build changes\n"
+    "- Exactly 3-5 bullet points total.\n"
+    "- Keep each bullet concise (about 5-10 words when possible).\n"
+    "- Focus on major code, runtime, API, CI, or dependency outcomes.\n"
+    "- Do not include low-signal refactors, formatting-only edits, or file inventories.\n"
 )
 
 REPO_ROLLUP_INTRO = [
