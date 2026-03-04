@@ -33,7 +33,7 @@ class OllamaClient:
                 response = self.session.post(self.url, json=payload, timeout=self.timeout_s)
                 response.raise_for_status()
                 data = response.json()
-                text = data.get("response", "")
+                text = self._extract_text(data)
                 if isinstance(text, str) and text.strip():
                     return OllamaResult(text=text.strip(), error=None)
                 last_error = OllamaError("Ollama returned empty response", details=json.dumps(data)[:1000])
@@ -47,3 +47,33 @@ class OllamaClient:
                 time.sleep(self.backoff_s * (2 ** attempt))
 
         return OllamaResult(text=None, error=last_error or OllamaError("unknown ollama error"))
+
+    @staticmethod
+    def _extract_text(data: dict) -> str:
+        response_text = data.get("response")
+        if isinstance(response_text, str) and response_text.strip():
+            return response_text
+
+        message = data.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            choice = choices[0]
+            if isinstance(choice, dict):
+                text = choice.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+                msg = choice.get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content
+        return ""

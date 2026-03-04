@@ -8,20 +8,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from utils.activity_logs import process_activity_logs
+from utils.aider import AiderClient
 from utils.git import (
-    branch_has_recent_commits,
-    diff_name_status,
-    diff_numstat,
-    diff_patch,
-    diff_stat,
-    ensure_clone,
-    fetch_all,
-    get_default_remote_branch,
-    list_remote_branches,
-    merge_base,
-    recent_merge_commits,
-    repo_dir_name_from_project,
-    rev_parse,
+    git_branch_has_recent_commits,
+    git_checkout,
+    git_diff_name_status,
+    git_diff_numstat,
+    git_diff_patch,
+    git_diff_stat,
+    git_ensure_clone,
+    git_fetch_all,
+    git_get_default_remote_branch,
+    git_list_remote_branches,
+    git_merge_base,
+    git_recent_merge_commits,
+    git_repo_dir_name_from_project,
+    git_rev_parse,
+    git_current_branch,
 )
 from utils.models import ActivitySummaryResult
 from utils.ollama import OllamaClient
@@ -75,8 +78,12 @@ class PipelineContext:
     out_dir: Path
     cache_dir: Path
     use_temp: bool
+    offline: bool
     include_ollama: bool
     ollama_client: OllamaClient | None
+    summarizer: str
+    aider_cmd: str
+    aider_model: str
     max_patch_chars: int
     max_prompt_chars: int
     max_files_in_patch: int
@@ -128,8 +135,12 @@ def init_pipeline_context(
     out_dir: Path,
     cache_dir: Path,
     use_temp: bool,
+    offline: bool,
     include_ollama: bool,
     ollama_client: OllamaClient | None,
+    summarizer: str,
+    aider_cmd: str,
+    aider_model: str,
     max_patch_chars: int,
     max_prompt_chars: int,
     max_files_in_patch: int,
@@ -151,8 +162,12 @@ def init_pipeline_context(
         out_dir=out_dir,
         cache_dir=cache_dir,
         use_temp=use_temp,
+        offline=offline,
         include_ollama=include_ollama,
         ollama_client=ollama_client,
+        summarizer=summarizer,
+        aider_cmd=aider_cmd,
+        aider_model=aider_model,
         max_patch_chars=max_patch_chars,
         max_prompt_chars=max_prompt_chars,
         max_files_in_patch=max_files_in_patch,
@@ -164,11 +179,11 @@ def init_pipeline_context(
     )
 
 def extract_version_signals(repo_dir: Path, base: str, head: str, paths: list[str]) -> list[str]:
-    from utils.git import git
+    from utils.git import git_run
 
     signals: list[str] = []
     for path in paths:
-        res = git(repo_dir, "diff", "--unified=0", f"{base}..{head}", "--", path)
+        res = git_run(repo_dir, "diff", "--unified=0", f"{base}..{head}", "--", path)
         if not res.ok:
             continue
         for line in res.stdout.splitlines():
@@ -467,7 +482,7 @@ def sync_repos(context: PipelineContext) -> None:
         ssh_url = str(item.get("ssh_url", "")).strip()
         project_name = str(item.get("project_name", "")).strip()
         repo_display = project_name or ssh_url
-        repo_key = repo_dir_name_from_project(project_name, ssh_url)
+        repo_key = git_repo_dir_name_from_project(project_name, ssh_url)
         repo_dir = context.work_root / repo_key
         repo_art_dir = context.artifacts_root / repo_key
         repo_art_dir.mkdir(parents=True, exist_ok=True)
@@ -482,17 +497,23 @@ def sync_repos(context: PipelineContext) -> None:
         activity_rollup = context.activity_result.rollups_by_project_name.get(repo_display)
         work_item.activity_rollup = activity_rollup
 
-        ok, err = ensure_clone(ssh_url, repo_dir)
+        ok, err = git_ensure_clone(ssh_url, repo_dir)
         if not ok:
             work_item.lines.append(f"- Clone error: {err}")
             context.errors.append(f"{repo_display}: clone error: {err}")
             _emit("REPO", f"{repo_display} clone failed")
             context.repo_items.append(work_item)
             continue
-        fetch_all(repo_dir)
+        if not context.offline:
+            git_fetch_all(repo_dir)
+        elif not (repo_dir / ".git").exists():
+            work_item.lines.append("- Offline mode: local clone missing in cache.")
+            context.errors.append(f"{repo_display}: offline mode requires an existing local clone")
+            context.repo_items.append(work_item)
+            continue
 
-        parent = get_default_remote_branch(repo_dir, context.remote) or f"{context.remote}/main"
-        branches, b_err = list_remote_branches(repo_dir, context.remote)
+        parent = git_get_default_remote_branch(repo_dir, context.remote) or f"{context.remote}/main"
+        branches, b_err = git_list_remote_branches(repo_dir, context.remote)
         if b_err or branches is None:
             msg = b_err or "unknown"
             work_item.lines.append(f"- Branch listing error: {msg}")
@@ -501,13 +522,13 @@ def sync_repos(context: PipelineContext) -> None:
             context.repo_items.append(work_item)
             continue
 
-        active = [b for b in branches if branch_has_recent_commits(repo_dir, b, f"{context.days} days ago")]
+        active = [b for b in branches if git_branch_has_recent_commits(repo_dir, b, f"{context.days} days ago")]
         work_item.parent = parent
         work_item.active_branches = active
         work_item.lines.append(f"- Active branches in window: {len(active)}")
         _emit("REPO", f"{repo_display} active_branches={len(active)}")
 
-        merges = recent_merge_commits(repo_dir, days=context.days)
+        merges = git_recent_merge_commits(repo_dir, days=context.days)
         work_item.merge_count = len(merges)
         if merges:
             work_item.lines.append("- Recent merge commits:")
@@ -554,14 +575,14 @@ def process_repo_branches(context: PipelineContext) -> None:
                 )
                 continue
 
-            base = merge_base(repo_item.repo_dir, repo_item.parent, branch)
-            head = rev_parse(repo_item.repo_dir, branch)
+            base = git_merge_base(repo_item.repo_dir, repo_item.parent, branch)
+            head = git_rev_parse(repo_item.repo_dir, branch)
             if not base or not head:
                 continue
 
-            stat = diff_stat(repo_item.repo_dir, base, head)
-            name_status = diff_name_status(repo_item.repo_dir, base, head)
-            num = diff_numstat(repo_item.repo_dir, base, head)
+            stat = git_diff_stat(repo_item.repo_dir, base, head)
+            name_status = git_diff_name_status(repo_item.repo_dir, base, head)
+            num = git_diff_numstat(repo_item.repo_dir, base, head)
             additions = sum(added for _, added, _ in num)
             deletions = sum(deleted for _, _, deleted in num)
             repo_item.branch_change_stats.append((branch, len(num), additions, deletions))
@@ -588,7 +609,7 @@ def process_repo_branches(context: PipelineContext) -> None:
             if context.force_resummarize and patch_path.exists():
                 patch = truncate(patch_path.read_text(encoding="utf-8"), context.max_patch_chars)
             else:
-                patch = truncate(diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
+                patch = truncate(git_diff_patch(repo_item.repo_dir, base, head, chosen_paths), context.max_patch_chars)
                 patch_path.write_text(patch, encoding="utf-8")
 
             prompt = truncate(
@@ -599,7 +620,41 @@ def process_repo_branches(context: PipelineContext) -> None:
             prompt_path.write_text(prompt, encoding="utf-8")
 
             summary_text: str | None = None
-            if context.include_ollama:
+            if context.summarizer == "aider":
+                orig_branch = git_current_branch(repo_item.repo_dir)
+                aider_client = AiderClient(context.aider_cmd, context.aider_model)
+                checkout_err = None
+                if orig_branch:
+                    checkout_res = git_checkout(repo_item.repo_dir, branch)
+                    if not checkout_res.ok:
+                        checkout_err = checkout_res.stderr.strip() or "checkout failed"
+                if checkout_err:
+                    summary_text = None
+                    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_checkout.log").write_text(
+                        json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": checkout_err}, indent=2),
+                        encoding="utf-8",
+                    )
+                else:
+                    aider_result = aider_client.summarize_branch_diff(
+                        repo_dir=repo_item.repo_dir,
+                        repo_display=repo_item.repo_display,
+                        branch=branch,
+                        parent_branch=repo_item.parent,
+                        stat=stat,
+                        patch=patch,
+                    )
+                    summary_text = aider_result.text
+                    if aider_result.error:
+                        call_err = aider_result.error
+                        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                        (context.errors_dir / f"{ts}_{repo_item.repo_key}_{safe_branch}_aider.log").write_text(
+                            json.dumps({"repo": repo_item.repo_display, "branch": branch, "error": call_err}, indent=2),
+                            encoding="utf-8",
+                        )
+                if orig_branch and orig_branch != branch:
+                    git_checkout(repo_item.repo_dir, orig_branch)
+            elif context.include_ollama:
                 patch_chunks = chunk_text(patch, max(1000, context.max_patch_chars // 2), overlap=500)
                 if len(patch_chunks) > 1:
                     chunk_summaries: list[str] = []

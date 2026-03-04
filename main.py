@@ -34,6 +34,8 @@ MAX_FILES_IN_PATCH_DEFAULT = int(os.getenv("MAX_FILES_IN_PATCH", "40"))
 OLLAMA_KEEP_ALIVE_DEFAULT = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
 OLLAMA_TIMEOUT_DEFAULT = int(os.getenv("OLLAMA_TIMEOUT", "240"))
 OLLAMA_RETRIES_DEFAULT = int(os.getenv("OLLAMA_RETRIES", "3"))
+AIDER_CMD_DEFAULT = os.getenv("AIDER_CMD", "aider")
+AIDER_MODEL_DEFAULT = os.getenv("AIDER_MODEL", "qwen3.5:27b")
 
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -47,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", default=".", help="Directory to write weeklySummary.markup outputs")
     parser.add_argument("--cache-dir", default="repo_cache")
     parser.add_argument("--temp", action="store_true")
+    parser.add_argument("--offline", action="store_true", help="Use local repo cache only; skip git fetch")
+    parser.add_argument("--summarizer", choices=["ollama", "aider"], default="ollama")
+    parser.add_argument("--aider-cmd", default=AIDER_CMD_DEFAULT, help="aider executable path")
+    parser.add_argument("--aider-model", default=AIDER_MODEL_DEFAULT, help="Model name for aider runs")
 
     parser.add_argument("--ollama-url", default=OLLAMA_URL_DEFAULT)
     parser.add_argument("--ollama-model", default=OLLAMA_MODEL_DEFAULT)
@@ -79,8 +85,12 @@ def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient) -> Pipe
         out_dir=Path(args.out_dir).resolve(),
         cache_dir=Path(args.cache_dir).resolve(),
         use_temp=args.temp,
-        include_ollama=True,
+        offline=args.offline,
+        include_ollama=(args.summarizer == "ollama"),
         ollama_client=ollama_client,
+        summarizer=args.summarizer,
+        aider_cmd=args.aider_cmd,
+        aider_model=args.aider_model,
         max_patch_chars=args.max_patch_chars,
         max_prompt_chars=args.max_prompt_chars,
         max_files_in_patch=args.max_files,
