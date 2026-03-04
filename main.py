@@ -37,8 +37,7 @@ OLLAMA_RETRIES_DEFAULT = int(os.getenv("OLLAMA_RETRIES", "3"))
 AIDER_CMD_DEFAULT = os.getenv("AIDER_CMD", "aider")
 AIDER_MODEL_DEFAULT = os.getenv("AIDER_MODEL", "qwen3.5:27b")
 
-def setup_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Weekly project summary pipeline")
@@ -105,7 +104,6 @@ def _run_pipeline(args: argparse.Namespace, ollama_client: OllamaClient) -> Pipe
 
 def main() -> int:
     args = parse_args()
-    setup_logging()
     start_time = dt.datetime.now(dt.timezone.utc)
 
     result = PipelineRunResult(
