@@ -12,7 +12,30 @@ NOISY_FILES = {
     "uv.lock",
     "poetry.lock",
 }
-NOISY_SUFFIXES = (".lock", ".min.js", ".map")
+NOISY_SUFFIXES = (
+    ".lock",
+    ".min.js",
+    ".map",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".svg",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+    ".webm",
+    ".mp3",
+    ".wav",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+)
 NOISY_PATH_CONTAINS = ("/node_modules/", "/dist/", "/build/", "/.venv/")
 
 VERSION_SIGNAL_PATHS = [
