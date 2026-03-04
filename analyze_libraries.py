@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import toml
 
@@ -184,6 +184,19 @@ def add_lib_keep_key(out: Dict[str, str], key: str, spec: str):
     if not key:
         return
     out[key] = stable_spec(spec)
+
+
+def version_sort_key(spec: str) -> Tuple[Tuple[int, ...], str]:
+    s = stable_spec(spec)
+    nums = tuple(int(x) for x in re.findall(r"\d+", s))
+    return nums, s
+
+
+def latest_version_in_use(specs: Set[str]) -> str:
+    cleaned = [s for s in (stable_spec(v) for v in specs) if s]
+    if not cleaned:
+        return ""
+    return max(cleaned, key=version_sort_key)
 
 
 def parse_python_req_name(spec: str) -> str:
@@ -387,15 +400,22 @@ _APK_ADD_RE = re.compile(r"(?i)\bapk\s+add\b([^&;]+)")
 def extract_docker_signals(dockerfile_path: Path) -> Dict[str, str]:
     libs: Dict[str, str] = {}
     text = safe_read_text(dockerfile_path)
+    stage_names: Set[str] = set()
 
     for line in text.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
 
-        m = re.match(r"(?i)^FROM\s+([^\s]+)", s)
+        m = re.match(r"(?i)^FROM\s+([^\s]+)(?:\s+AS\s+([^\s]+))?", s)
         if m:
             image = m.group(1).strip()
+            stage_alias = (m.group(2) or "").strip().lower()
+            if stage_alias:
+                stage_names.add(stage_alias)
+            if image.lower() in stage_names:
+                continue
+
             key, tag = runtime_key_from_image(image)
             if key:
                 add_lib_keep_key(libs, key, tag or image)
@@ -433,14 +453,6 @@ def extract_docker_signals(dockerfile_path: Path) -> Dict[str, str]:
         if re.search(r"(?i)\bpip\s+install\b", s):
             add_lib_keep_key(libs, "pip-install", s)
 
-        # npm ci / npm install / pnpm / yarn
-        if re.search(r"(?i)\bnpm\s+(ci|install)\b", s):
-            add_lib_keep_key(libs, "npm-install", s)
-        if re.search(r"(?i)\bpnpm\s+install\b", s):
-            add_lib_keep_key(libs, "pnpm-install", s)
-        if re.search(r"(?i)\byarn\s+install\b", s):
-            add_lib_keep_key(libs, "yarn-install", s)
-
         # uv sync / uv pip install
         if re.search(r"(?i)\buv\s+sync\b", s) or re.search(r"(?i)\buv\s+pip\s+install\b", s):
             add_lib_keep_key(libs, "uv", s)
@@ -469,12 +481,6 @@ def extract_compose_signals(compose_path: Path) -> Dict[str, str]:
                     add_lib_keep_key(libs, key, tag or str(image))
                 else:
                     add_lib(libs, f"docker-image:{image}", f"{svc_name}: image {image}")
-
-            build = svc.get("build")
-            if isinstance(build, dict):
-                dockerfile = build.get("dockerfile")
-                if dockerfile:
-                    add_lib_keep_key(libs, f"dockerfile:{dockerfile}", f"{svc_name}: dockerfile {dockerfile}")
 
     return libs
 
@@ -583,7 +589,6 @@ def build_matrix(
     repos: List[str],
     *,
     min_repos: int = 1,
-    only_mismatches: bool = False,
 ) -> Tuple[List[str], List[Dict[str, str]]]:
     # lib -> repo -> spec (if multiple, join with " | " deterministically)
     lib_repo_specs: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -592,7 +597,7 @@ def build_matrix(
         for u in usages:
             lib_repo_specs[lib][u.repo].add(stable_spec(u.version_or_spec))
 
-    header = ["Library"] + repos
+    header = ["Library", "LatestVersionInUse"] + repos
     out_rows: List[Dict[str, str]] = []
 
     for lib in sorted(lib_repo_specs.keys()):
@@ -602,16 +607,14 @@ def build_matrix(
         if repo_count < min_repos:
             continue
 
-        # compute distinct specs across repos
         distinct: Set[str] = set()
         for r in repo_map:
             distinct.update(repo_map[r])
 
-        is_mismatch = len(distinct) > 1
-        if only_mismatches and not is_mismatch:
-            continue
-
-        row: Dict[str, str] = {"Library": lib}
+        row: Dict[str, str] = {
+            "Library": lib,
+            "LatestVersionInUse": latest_version_in_use(distinct),
+        }
         for r in repos:
             if r not in repo_map:
                 row[r] = ""
@@ -633,70 +636,17 @@ def write_matrix_csv(header: List[str], rows: List[Dict[str, str]], out_path: Pa
             w.writerow(row)
 
 
-def build_mismatch_report(
-    library_usage: Dict[str, List[Usage]],
-    *,
-    min_repos: int = 2,
-) -> List[Dict[str, str]]:
-    lib_repo_specs: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
-
-    for lib, usages in library_usage.items():
-        for u in usages:
-            lib_repo_specs[lib][u.repo].add(stable_spec(u.version_or_spec))
-
-    report: List[Dict[str, str]] = []
-    for lib, repo_map in lib_repo_specs.items():
-        repo_count = len(repo_map)
-        if repo_count < min_repos:
-            continue
-
-        distinct: Set[str] = set()
-        for specs in repo_map.values():
-            distinct.update(specs)
-
-        if len(distinct) <= 1:
-            continue
-
-        report.append(
-            {
-                "Library": lib,
-                "RepoCount": str(repo_count),
-                "DistinctSpecCount": str(len(distinct)),
-                "DistinctSpecs": " || ".join(sorted(distinct)),
-                "Repos": ", ".join(sorted(repo_map.keys())),
-            }
-        )
-
-    # rank: most repos affected first, then most distinct specs
-    report.sort(key=lambda x: (int(x["RepoCount"]), int(x["DistinctSpecCount"])), reverse=True)
-    return report
-
-
-def write_mismatch_csv(rows: List[Dict[str, str]], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["Library", "RepoCount", "DistinctSpecCount", "DistinctSpecs", "Repos"]
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Analyze dependency versions across repos and emit a matrix + mismatch report.")
+    ap = argparse.ArgumentParser(description="Analyze dependency versions across repos and emit usage + matrix CSV reports.")
     ap.add_argument("--repo-cache", default="./repo_cache", help="Path to repo cache directory (folders = apps).")
     ap.add_argument("--usage-csv", default="./library_usage.csv", help="Output CSV for row-per-occurrence usage.")
     ap.add_argument("--matrix-csv", default="./library_matrix.csv", help="Output CSV for library x repo matrix.")
-    ap.add_argument("--mismatch-csv", default="./library_mismatches.csv", help="Output CSV for mismatch report.")
-    ap.add_argument("--min-repos", type=int, default=2, help="Only include libraries used by at least N repos.")
-    ap.add_argument("--only-mismatches", action="store_true", help="Only include libraries with mismatched specs across repos in the matrix.")
-    ap.add_argument("--top", type=int, default=25, help="How many top 'start here' mismatch libs to print.")
+    ap.add_argument("--min-repos", type=int, default=1, help="Only include libraries used by at least N repos.")
     args = ap.parse_args()
 
     repo_cache_path = Path(args.repo_cache)
     usage_csv_path = Path(args.usage_csv)
     matrix_csv_path = Path(args.matrix_csv)
-    mismatch_csv_path = Path(args.mismatch_csv)
 
     library_usage, repos = scan_repo_cache(repo_cache_path)
 
@@ -708,18 +658,8 @@ def main() -> int:
         library_usage,
         repos,
         min_repos=args.min_repos,
-        only_mismatches=args.only_mismatches,
     )
     write_matrix_csv(header, rows, matrix_csv_path)
-
-    # 3) Mismatch report (always mismatch-only)
-    mismatch_rows = build_mismatch_report(library_usage, min_repos=args.min_repos)
-    write_mismatch_csv(mismatch_rows, mismatch_csv_path)
-
-    # Console summary: what to start with
-    print("\n=== What to start with (most common libs with version/spec mismatches) ===")
-    for r in mismatch_rows[: max(0, args.top)]:
-        print(f"- {r['Library']}  (repos={r['RepoCount']}, distinct_specs={r['DistinctSpecCount']})")
 
     # Also show top libs by occurrences
     top_occ = sorted(library_usage.items(), key=lambda x: len(x[1]), reverse=True)[:15]
@@ -731,7 +671,6 @@ def main() -> int:
     print("\nWrote:")
     print(f"- usage CSV:     {usage_csv_path.resolve()}")
     print(f"- matrix CSV:    {matrix_csv_path.resolve()}")
-    print(f"- mismatch CSV:  {mismatch_csv_path.resolve()}")
 
     return 0
 
