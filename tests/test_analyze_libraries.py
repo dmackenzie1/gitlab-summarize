@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 with mock.patch.dict("sys.modules", {"toml": types.SimpleNamespace(load=lambda *_a, **_k: {})}):
-    from analyze_libraries import find_manifests, is_manifest_filename, parse_manifest
+    from analyze_libraries import build_matrix, find_manifests, is_manifest_filename, parse_manifest
 
 
 class AnalyzeLibrariesTests(unittest.TestCase):
@@ -43,6 +43,40 @@ class AnalyzeLibrariesTests(unittest.TestCase):
 
             self.assertEqual(kind, "Dockerfile")
             self.assertEqual(libs.get("runtime:node"), "18-alpine")
+
+    def test_parse_manifest_skips_internal_docker_stages_and_reads_registry_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dockerfile = Path(tmp) / "Dockerfile"
+            dockerfile.write_text(
+                "\n".join(
+                    [
+                        "FROM eegitlabregistry.fit.nasa.gov/emss/docker-images/nginx:1.28.0-alpine AS base",
+                        "FROM node:24.13.1-alpine3.23 AS web",
+                        "FROM base AS release",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            _, libs = parse_manifest(dockerfile)
+
+            self.assertEqual(libs.get("runtime:nginx"), "1.28.0-alpine")
+            self.assertEqual(libs.get("runtime:node"), "24.13.1-alpine3.23")
+            self.assertNotIn("runtime:base", libs)
+
+    def test_build_matrix_contains_latest_version_column(self):
+        usage = {
+            "runtime:node": [
+                types.SimpleNamespace(repo="a", relpath="Dockerfile", manifest_type="Dockerfile", version_or_spec="22.12.0"),
+                types.SimpleNamespace(repo="b", relpath="Dockerfile", manifest_type="Dockerfile", version_or_spec="24.13.1-alpine3.23"),
+            ]
+        }
+
+        header, rows = build_matrix(usage, ["a", "b"], min_repos=1)
+
+        self.assertEqual(header, ["Library", "LatestVersionInUse", "a", "b"])
+        self.assertEqual(rows[0]["LatestVersionInUse"], "24.13.1-alpine3.23")
 
 
 if __name__ == "__main__":
