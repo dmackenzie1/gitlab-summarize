@@ -63,6 +63,8 @@ EXCLUDE_DIRS = {
 
 PY_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*")
 REQ_LINE_CONTINUATION_RE = re.compile(r"\\\s*$")
+VARIABLE_VERSION_RE = re.compile(r"\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*")
+NUMERIC_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,19 @@ def iter_text_lines(path: Path) -> Iterable[str]:
 
 def stable_spec(spec: str) -> str:
     return (spec or "").strip()
+
+
+def clean_version(spec: str) -> str:
+    text = stable_spec(spec)
+    if not text or VARIABLE_VERSION_RE.search(text):
+        return ""
+
+    exact_python = re.match(r"^[A-Za-z0-9._+-]+==\s*(\d+(?:\.\d+)+)\.?$", text)
+    if exact_python:
+        return exact_python.group(1)
+
+    m = NUMERIC_VERSION_RE.search(text)
+    return m.group(0) if m else ""
 
 
 def is_dockerfile_name(filename: str) -> bool:
@@ -551,12 +566,15 @@ def scan_repo_cache(repo_cache_path: Path) -> Tuple[Dict[str, List[Usage]], List
             rel = mf.relative_to(repo_path).as_posix()
 
             for lib, spec in libs.items():
+                cleaned = clean_version(str(spec))
+                if not cleaned:
+                    continue
                 library_usage[lib].append(
                     Usage(
                         repo=repo_name,
                         relpath=rel,
                         manifest_type=kind,
-                        version_or_spec=str(spec).strip(),
+                        version_or_spec=cleaned,
                     )
                 )
 
@@ -595,9 +613,11 @@ def build_matrix(
 
     for lib, usages in library_usage.items():
         for u in usages:
-            lib_repo_specs[lib][u.repo].add(stable_spec(u.version_or_spec))
+            cleaned = clean_version(u.version_or_spec)
+            if cleaned:
+                lib_repo_specs[lib][u.repo].add(cleaned)
 
-    header = ["Library", "LatestVersionInUse"] + repos
+    header = ["Library", "AppsCount", "LatestVersionInUse"] + repos
     out_rows: List[Dict[str, str]] = []
 
     for lib in sorted(lib_repo_specs.keys()):
@@ -613,6 +633,7 @@ def build_matrix(
 
         row: Dict[str, str] = {
             "Library": lib,
+            "AppsCount": str(repo_count),
             "LatestVersionInUse": latest_version_in_use(distinct),
         }
         for r in repos:

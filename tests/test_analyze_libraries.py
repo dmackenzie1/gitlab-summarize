@@ -5,7 +5,13 @@ from pathlib import Path
 from unittest import mock
 
 with mock.patch.dict("sys.modules", {"toml": types.SimpleNamespace(load=lambda *_a, **_k: {})}):
-    from analyze_libraries import build_matrix, find_manifests, is_manifest_filename, parse_manifest
+    from analyze_libraries import (
+        build_matrix,
+        clean_version,
+        find_manifests,
+        is_manifest_filename,
+        parse_manifest,
+    )
 
 
 class AnalyzeLibrariesTests(unittest.TestCase):
@@ -65,7 +71,7 @@ class AnalyzeLibrariesTests(unittest.TestCase):
             self.assertEqual(libs.get("runtime:node"), "24.13.1-alpine3.23")
             self.assertNotIn("runtime:base", libs)
 
-    def test_build_matrix_contains_latest_version_column(self):
+    def test_build_matrix_contains_app_count_and_latest_version_column(self):
         usage = {
             "runtime:node": [
                 types.SimpleNamespace(repo="a", relpath="Dockerfile", manifest_type="Dockerfile", version_or_spec="22.12.0"),
@@ -75,8 +81,13 @@ class AnalyzeLibrariesTests(unittest.TestCase):
 
         header, rows = build_matrix(usage, ["a", "b"], min_repos=1)
 
-        self.assertEqual(header, ["Library", "LatestVersionInUse", "a", "b"])
-        self.assertEqual(rows[0]["LatestVersionInUse"], "24.13.1-alpine3.23")
+        self.assertEqual(header, ["Library", "AppsCount", "LatestVersionInUse", "a", "b"])
+        self.assertEqual(rows[0]["AppsCount"], "2")
+        self.assertEqual(rows[0]["LatestVersionInUse"], "24.13.1")
+
+    def test_clean_version_rejects_variables_and_extracts_numeric_exacts(self):
+        self.assertEqual(clean_version("${version_number}"), "")
+        self.assertEqual(clean_version("package-name==1.2.3."), "1.2.3")
 
 
 if __name__ == "__main__":
