@@ -51,6 +51,18 @@ Supported settings include Ollama model/timeout, summary sizing caps, and SMTP d
 python main.py --out-dir out
 ```
 
+To use aider for branch summarization, install it first:
+
+```bash
+pip install aider-chat
+```
+
+Then run with:
+
+```bash
+python main.py --out-dir out --summarizer aider --aider-model qwen3.5:27b
+```
+
 Default behavior:
 - `days=10`
 - `projects=data/projects.json`
@@ -75,6 +87,9 @@ Default behavior:
 - `--ollama-keep-alive 5m`
 - `--max-files <n>` / `--max-patch-chars <n>` / `--max-prompt-chars <n>`
 - `--resummarize` (reuse saved patch artifacts, regenerate prompts, and resave summaries)
+- `--offline` (skip remote fetch; use existing `repo_cache` clones as-is)
+- `--summarizer ollama|aider` (default: `ollama`)
+- `--aider-cmd <path>` / `--aider-model <name>` (used when `--summarizer aider`)
 
 ## Completion email
 
